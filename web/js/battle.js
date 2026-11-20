@@ -1,5 +1,6 @@
 import { createMap, terrainColors } from "./map.js";
 import { escapeHtml as esc, number, percent } from "./ui.js";
+import { createDebugPanel } from "./debug.js";
 
 const statusNames = { idle: "대기", move: "이동", engaged: "교전", retreat: "후퇴" };
 const endReasons = { hq: "본부 함락", time: "제한 시간 종료", surrender: "항복", stopped: "관전 종료 · 영토 판정" };
@@ -26,7 +27,8 @@ export function createBattle(root, options) {
         <div><span>배속</span><strong id="speed">—</strong></div>
       </div>
       ${sandbox ? `<div class="speed-control" role="group" aria-label="시간 배속">${data.rules.speeds.map((value) =>
-        `<button data-speed="${value}">${value}×</button>`).join("")}</div>` : ""}
+        `<button data-speed="${value}">${value}×</button>`).join("")}</div>
+      <button id="debug-toggle" class="quiet" title="F2">디버그</button>` : ""}
       <button id="surrender" class="danger" disabled>항복</button>
     </header>
     <aside class="battle-left">
@@ -52,6 +54,7 @@ export function createBattle(root, options) {
   const overlay = get("battle-overlay");
   const surrender = get("surrender");
   let map;
+  let debugPanel;
   let init;
   let state;
   let finished = false;
@@ -146,6 +149,10 @@ export function createBattle(root, options) {
       weatherNames,
     });
     for (const { id, name } of init.custom_battalions ?? []) battalions.set(id, name);
+    if (init.sandbox) {
+      debugPanel = createDebugPanel(frame, { send, init });
+      get("debug-toggle").onclick = () => debugPanel.toggle();
+    }
     const title = init.sandbox ? `${init.bots ? "봇전투" : "샌드박스"} · ${init.map_name}` : data.stages[init.stage]?.name;
     if (init.bots) {
       surrender.textContent = "관전 종료";
@@ -208,6 +215,7 @@ export function createBattle(root, options) {
           if (!map) break;
           state = message;
           map.update(state);
+          debugPanel?.state(state);
           get("time-left").textContent = clock(init.match_seconds - state.time);
           get("resources").textContent = `${number(Math.floor(state.res))} / +${number(state.income)}초당`;
           get("build-speed").textContent = `${number(state.build_speed)}×`;
@@ -216,6 +224,9 @@ export function createBattle(root, options) {
           showQueue(state.queue);
           showSelected();
           updateProduction();
+          break;
+        case "debug":
+          debugPanel?.receive(message);
           break;
         case "event":
           eventLine(message.msg, message.kind);
@@ -243,6 +254,7 @@ export function createBattle(root, options) {
       display(message, "작전 연결 종료");
     },
     destroy() {
+      debugPanel?.destroy();
       map?.destroy();
       frame.remove();
     },

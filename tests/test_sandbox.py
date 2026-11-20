@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT))
 
 from server.game import data, geomap, hexmap, sandbox, scripting  # noqa: E402
 from server.game.sim import Game  # noqa: E402
+from server.game.ai import brain  # noqa: E402
 
 EXAMPLES = ROOT / "Planner" / "sandbox"
 USER = {"templates": data.DEFAULT_TEMPLATES, "unlocks": dict.fromkeys(data.BASE_UNLOCKED, 1)}
@@ -48,6 +49,40 @@ def collection(*features):
 def base(kind, side, lon, lat):
     return {"type": "Feature", "properties": {"base": kind, "side": side, "name": f"{kind}{side}"},
             "geometry": {"type": "Point", "coordinates": [lon, lat]}}
+
+
+class DebugWindow(unittest.TestCase):
+    def test_campaign_rejects_debug(self):
+        game = Game(1, "easy", seed=1)
+
+        with self.assertRaises(ValueError):
+            game.command({"t": "debug", "on": True})
+
+    def test_report_has_profile_and_decisions(self):
+        game = sandbox_game(bots=True)
+        game.command({"t": "debug", "on": True})
+
+        for _ in range(100):
+            game.tick()
+
+        report = game.debug_message()
+        json.dumps(report)
+
+        names = set()
+
+        for section in report["profile"]["sections"]:
+            names.add(section["name"])
+
+        self.assertEqual(report["profile"]["ticks"], 100)
+        self.assertTrue({"combat", "move", "ai1", "ai2", "ai2/goap"} <= names)
+        self.assertEqual(len(report["ai"]), 2)
+        self.assertTrue(report["ai"][1]["goals"])
+
+        # 창을 닫으면 측정이 멈춘다.
+        game.command({"t": "debug", "on": False})
+        game.tick()
+        self.assertIsNone(game.profiler)
+        self.assertIsNone(game.ai.profiler)
 
 
 class Speed(unittest.TestCase):
@@ -301,11 +336,51 @@ class AIEngines(unittest.TestCase):
         self.assertEqual(names, ["high", "low", "vetoed"])
         self.assertEqual(ranked[2].score, 0)
 
-    def test_campaign_ai_takes_idle_hq(self):
+    def test_campaign_ai_takes_idle_bases(self):
         game = Game(2, "hard", seed=4)
+        start = {}
+
+        for base in game.bases:
+            start[base.id] = base.side
+
+        taken = 0
+
         while game.winner is None:
             game.tick()
-        self.assertEqual((game.winner, game.reason), (2, "hq"))
+
+            for base in game.bases:
+                if start[base.id] == 1 and base.side == 2:
+                    taken += 1
+                    start[base.id] = 2
+
+        self.assertEqual(game.winner, 2)
+        self.assertGreaterEqual(taken, 1)
+
+    def test_no_weak_attacks_and_every_goal_has_reason(self):
+        game = sandbox_game(bots=True, seed=3)
+        checked = 0
+
+        for tick in range(4000):
+            game.tick()
+
+            if tick % 30 != 0:
+                continue
+
+            for ai in (game.ai, game.bot):
+                state = ai.debug_state()
+
+                for goal in state["goals"]:
+                    self.assertNotEqual(goal["reason"], "검토 안 함", goal["name"])
+
+                for squad in state["squads"]:
+                    moving = "Advance" in squad["plan"] or "Assault" in squad["plan"]
+
+                    if moving and squad["required"]:
+                        checked += 1
+                        self.assertGreaterEqual(squad["power"], squad["required"] * brain.MIN_COMMIT - 0.5,
+                                                squad)
+
+        self.assertGreater(checked, 0)
 
 
 class LuaIsolation(unittest.TestCase):

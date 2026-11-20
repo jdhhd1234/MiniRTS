@@ -4,9 +4,11 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from math import dist, floor
 from random import Random
+from time import perf_counter
 
 from . import data, hexmap as world
 from .ai import AI, AIProfile
+from .profiler import Profiler
 from .scripting import ScriptError
 
 TICK_HZ = 10
@@ -377,6 +379,8 @@ class Game:
         self.next_unit_id = 0
         self.ai = AI(2, self.difficulty_data, profiles.get(2, AIProfile()))
         self.bot = AI(1, self.difficulty_data, profiles.get(1, AIProfile())) if self.bots else None
+        self.profiler = None      # 샌드박스 디버그 창이 열려 있을 때만 Profiler
+        self.loop_stats = {}      # main._play가 채우는 실시간 루프 정보
         self._deploy_starting_units()
 
     @property
@@ -689,13 +693,22 @@ class Game:
 
     def _call_hook(self, hooks, name, context, default, low, high):
         """Lua 훅 호출. nil이면 default. 오류면 그 대대의 훅을 끄고 작전 기록에 남긴다."""
+        started = perf_counter() if self.profiler is not None else 0.0
+
         try:
             value = hooks.number(name, context, low, high)
         except ScriptError as exc:
             self.events.append({"t": "event", "msg": f"Lua 오류로 훅을 껐습니다 · {exc}", "kind": "bad"})
-            return default
+            value = None
+        finally:
+            if self.profiler is not None:
+                self.profiler.add(f"lua/{hooks.key}.{name}", perf_counter() - started)
 
         return default if value is None else value
+
+    def _lap(self, name):
+        if self.profiler is not None:
+            self.profiler.lap(name)
 
     def _defense(self, target):
         if isinstance(target, Base):
@@ -886,6 +899,9 @@ class Game:
             return
         self.ticks += 1
 
+        if self.profiler is not None:
+            self.profiler.start_tick()
+
 
         # 1. 날씨 변경
         for i, deadline in enumerate(self.weather_due):
@@ -894,14 +910,23 @@ class Game:
                 self.weather_due[i] = self.ticks + self._weather_interval()
 
 
+        self._lap("weather")
+
+
         # 2. AI 판단과 생산
+        self.ai.profiler = self.profiler
         self.ai.update(self)
+        self._lap("ai2")
 
         if self.bot is not None:
+            self.bot.profiler = self.profiler
             self.bot.update(self)
+            self._lap("ai1")
 
         for side in SIDES:
             self._produce(side)
+
+        self._lap("produce")
 
 
         # 3. 이동: 후퇴 갱신 후, 교전 중이 아닌(또는 후퇴 중인) 사단만 행군
@@ -927,6 +952,8 @@ class Game:
         for unit in marching:
             self._march(unit)
 
+        self._lap("move")
+
 
         # 4. 사거리 안의 적 목록 (거리, id 순)
         self._unit_index = UnitIndex(self.units.values(), self.max_range)
@@ -936,11 +963,16 @@ class Game:
             contacts = self._unit_index.nearby(3 - unit.side, unit.x, unit.y, self.max_range)
             nearby[unit.id] = sorted(contacts, key=Contact.sort_key)
 
+        self._lap("spatial_index")
+
 
         # 5. 보급, 전투, 영토
         self._update_supply(bases)
+        self._lap("supply")
         captured = self._combat(nearby, bases)
+        self._lap("combat")
         self._claim_territory()
+        self._lap("territory")
 
 
         # 6. 기지 함락: 동시 함락은 기지 순서대로 처리
@@ -950,11 +982,16 @@ class Game:
         if captured:
             self._update_supply(self._bases_by_side())
 
+        self._lap("capture")
+
 
         # 7. 시간 종료: 영토가 많은 쪽 승리
         if self.winner is None and self.ticks >= data.MATCH_SECONDS * TICK_HZ:
             self.winner = 1 if self.territory[1] > self.territory[2] else 2
             self.reason = "time"
+
+        if self.profiler is not None:
+            self.profiler.end_tick()
 
     def command(self, message):
         if self.winner is not None:
@@ -975,6 +1012,20 @@ class Game:
 
         elif command == "build":
             self.build(1, message.get("template"))
+
+        elif command == "debug":
+            if not self.sandbox:
+                raise ValueError("디버그 창은 샌드박스에서만 쓸 수 있습니다.")
+
+            on = message.get("on") is True
+
+            if on and self.profiler is None:
+                self.profiler = Profiler()
+            elif not on:
+                self.profiler = None
+                self.ai.profiler = None
+                if self.bot is not None:
+                    self.bot.profiler = None
 
         elif command == "speed":
             value = message.get("value")
@@ -1147,6 +1198,42 @@ class Game:
             "weather": weather,
             "terr": self.territory[1:],
             "speed": self.speed
+        }
+
+        return message
+
+    def debug_message(self):
+        """디버그 창 1초 보고: 프로파일 창, AI 의사결정, 캐시·개체 수."""
+
+        # 1. 프로파일 (틱 예산 = 실시간 1틱 길이)
+        profile = self.profiler.report(1000 / (TICK_HZ * self.speed))
+
+
+        # 2. AI 의사결정
+        brains = []
+
+        for ai in (self.bot, self.ai):
+            if ai is not None:
+                brains.append(ai.debug_state())
+
+
+        # 3. 개체 수와 경로 캐시
+        counts = {"units_1": 0, "units_2": 0, "queue_1": len(self.queues[1]), "queue_2": len(self.queues[2])}
+
+        for unit in self.units.values():
+            counts[f"units_{unit.side}"] += 1
+
+        cache = self.map.pathfinder.find.cache_info()
+        message = {
+            "t": "debug",
+            "time": self.time,
+            "speed": self.speed,
+            "profile": profile,
+            "ai": brains,
+            "counts": counts,
+            "path_cache": {"hits": cache.hits, "misses": cache.misses, "size": cache.currsize,
+                           "max": cache.maxsize},
+            "loop": dict(self.loop_stats),
         }
 
         return message

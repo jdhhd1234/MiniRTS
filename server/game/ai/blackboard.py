@@ -53,6 +53,14 @@ class Squad:
     waypoint: int | None = None                  # 고정된 집결지 셀 (HTN Advance:staged)
     plan: list = field(default_factory=list)    # 마지막 GOAP 계획 (행동 이름)
     trace: list = field(default_factory=list)   # 마지막 HTN 분해 (작업:방법)
+    facts: dict = field(default_factory=dict)   # 마지막 GOAP 시작 사실 (디버그 창)
+
+
+@dataclass
+class Shelved:
+    """잠시 포기한 공격 목표: until(게임 시각)까지 새 분대를 만들지 않는다."""
+    until: float
+    reason: str
 
 
 @dataclass
@@ -63,6 +71,7 @@ class Blackboard:
     # 기억
     squads: dict = field(default_factory=dict)      # id -> Squad
     next_squad_id: int = 1
+    shelved: dict = field(default_factory=dict)     # 목표 이름 -> Shelved
 
 
     # 인지 (refresh에서 다시 채운다)

@@ -169,15 +169,26 @@ async def _play(socket, game):
     clock = start
     clock_ticks = game.ticks
     clock_speed = game.speed
+    next_debug = start + 1
+    game.loop_stats = {"lag_resets": 0, "commands": 0}
 
     receiver = asyncio.create_task(_receive(socket))
     try:
         while game.winner is None:
             now = loop.time()
 
-            if game.speed != clock_speed or now - (clock + (game.ticks - clock_ticks + 1)
-                                                   / (TICK_HZ * clock_speed)) > MAX_LAG:
+            lag = now - (clock + (game.ticks - clock_ticks + 1) / (TICK_HZ * clock_speed))
+
+            if game.speed != clock_speed or lag > MAX_LAG:
+                if lag > MAX_LAG:
+                    game.loop_stats["lag_resets"] += 1
                 clock, clock_ticks, clock_speed = now, game.ticks, game.speed
+
+            game.loop_stats["lag_ms"] = round(max(0.0, lag) * 1000, 1)
+
+            if game.profiler is not None and now >= next_debug:
+                next_debug = now + 1
+                await socket.send_json(game.debug_message())
 
             next_tick = clock + (game.ticks - clock_ticks + 1) / (TICK_HZ * clock_speed)
             next_state = start + state_number / STATE_HZ
@@ -194,6 +205,7 @@ async def _play(socket, game):
 
             if receiver.done() and game.winner is None:
                 try:
+                    game.loop_stats["commands"] += 1
                     game.command(receiver.result())
                 except ValueError as exc:
                     await _error(socket, exc)

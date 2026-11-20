@@ -10,22 +10,38 @@
 
 from dataclasses import dataclass, field
 from math import dist
+from time import perf_counter
 
 from .. import data, hexmap as world
 from . import goap, utility
-from .blackboard import BASE_VALUE, Blackboard, base_power, distance, unit_power
+from .blackboard import BASE_VALUE, Blackboard, Shelved, base_power, distance, unit_power
 from .htn import Compound, Domain, Method, Primitive
 
 ENGAGE_NEAR = 50          # 표적까지 이 거리(km) 안이면 '근접'
 COHESION = 70             # 분대원이 중심에서 이 거리(km) 안이면 '집결'
 STAGING_GAP = 120         # 먼 표적은 이 거리(km) 앞 집결지를 먼저 거친다
 STAGING_FROM = 220        # 표적이 이보다 멀면 집결지를 쓴다
-PATIENCE = 40             # 증원을 이만큼(초) 기다려도 약하면 그냥 진격
+PATIENCE = 40             # 증원을 이만큼(초) 기다린 뒤에는 MIN_COMMIT 이상이면 진격
+MIN_COMMIT = 0.5          # PATIENCE 뒤에도 필요 전력의 이 비율이 안 되면 목표를 포기
+OVERKILL = 2.0            # 남는 사단은 이 배수 미만인 분대부터 채운다 (한 분대 몰빵 방지)
+SHELVE_SECONDS = 30       # 포기한 목표는 이만큼(초) 다시 고르지 않는다
 MAX_SQUAD = 8
 EMERGENCY = 0.55          # 이 이상인 방어 목표는 공격 분대 병력을 끌어온다
 MIN_GOAL_SCORE = 0.05
 MIN_BUILD_SCORE = 0.1
 MAX_QUEUE = 2
+
+
+@dataclass
+class Need:
+    """distribute_spare용: 공격 분대의 현재 전력과 필요 전력."""
+    squad: object
+    power: float
+    required: float
+
+    @property
+    def ratio(self):
+        return self.power / self.required
 
 
 @dataclass
@@ -263,6 +279,9 @@ def _assign_until_strong(context):
             break
         board.assign(context.squad, unit)
 
+    if _power(context.units) < required:
+        context.ai.note(context.squad.target_key, "증원 중 · 가용 사단이 모자람")
+
 
 def _build_best(context):
     context.ai.build_best(context.game)
@@ -412,12 +431,46 @@ class AI:
         self.next_think = 0
         self.game = None
 
+
+        # 디버그 창: 마지막 생각의 결정과 시간. profiler는 창이 열려 있을 때만 Game이 넣어 준다.
+        self.profiler = None
+        self.last_goals = []
+        self.last_builds = []
+        self.last_think_at = None
+        self.last_think_ms = 0.0
+        self.last_phases = {}
+        self.decisions = {}       # 목표 이름 -> 이번 생각의 선택 결과·사유
+        self._phase_start = 0.0
+
+    def note(self, key, reason, chosen=None):
+        """목표 결정 사유 기록. chosen이 None이면 기존 선택 여부를 유지한다."""
+
+        previous = self.decisions.get(key)
+
+        if chosen is None:
+            chosen = previous["chosen"] if previous is not None else False
+
+        self.decisions[key] = {"chosen": chosen, "reason": reason}
+
+    def _phase(self, name):
+        now = perf_counter()
+        seconds = now - self._phase_start
+        self.last_phases[name] = round(seconds * 1000, 3)
+
+        if self.profiler is not None:
+            self.profiler.add(f"ai{self.side}/{name}", seconds)
+
+        self._phase_start = now
+
     def update(self, game):
         if game.time < self.next_think:
             return
         self.next_think = round(self.next_think + self.think, 6)
         self.game = game
         board = self.blackboard
+        started = self._phase_start = perf_counter()
+        self.last_phases = {}
+        self.decisions = {}
 
 
         # 1. 인지
@@ -430,30 +483,47 @@ class AI:
                 game.retreat_unit(unit)
 
         board.refresh(game)
+        self._phase("perceive")
 
 
         # 3. 생산 (Utility)
         if board.queue_length < MAX_QUEUE:
             self.build_best(game)
 
+        self._phase("production")
+
 
         # 4. 목표 선택 (Utility)
         ranked = self.rank_goals()
+        self.last_goals = ranked[:10]
+        self._phase("utility")
 
 
         # 5. 분대 배정
         self.assign_squads(ranked)
+        self._phase("assign")
 
 
-        # 6. 분대별 GOAP 계획 → HTN 실행
-        for squad in list(board.squads.values()):
+        # 6. 분대별 GOAP 계획 → HTN 실행 (점수 높은 분대가 가용 사단을 먼저 모은다)
+        squads = sorted(board.squads.values(), key=lambda squad: -squad.score)
+
+        for squad in squads:
             self.run_squad(squad)
 
+        self._phase("squads")
 
-        # 7. 남은 사단은 대기
+
+        # 7. 그래도 남은 사단은 전력이 가장 모자란 공격 분대에 보탠다.
+        self.distribute_spare()
+
+
+        # 8. 남은 사단은 대기 (예비대)
         for unit in board.free_units:
             unit.path.clear()
             unit.destination = None
+
+        self.last_think_at = game.time
+        self.last_think_ms = round((perf_counter() - started) * 1000, 3)
 
     # -------------------------------------------------------------- Utility
 
@@ -466,6 +536,7 @@ class AI:
                                           self.profile.build, template))
 
         ranked = utility.rank(options, self)
+        self.last_builds = ranked
 
         if not ranked or ranked[0].score < MIN_BUILD_SCORE:
             return False
@@ -524,47 +595,137 @@ class AI:
                 squad.score = entry.score
 
 
-        # 2. 점수 높은 목표부터 분대 유지·생성
+        # 2. 공격 분대 전력 점검: 오래 기다려도 너무 약하면 포기
+        for squad in list(board.squads.values()):
+            if squad.goal == "attack":
+                self.check_strength(squad)
+
+        for key, shelf in list(board.shelved.items()):
+            if board.time >= shelf.until:
+                del board.shelved[key]
+
+
+        # 3. 점수 높은 목표부터 분대 유지·생성
         attack_squads = 0
-        best_attack = None
+        saturated = True
 
         for squad in board.squads.values():
             if squad.goal == "attack":
                 attack_squads += 1
 
+                if squad.unit_ids and self.strength(squad) < OVERKILL:
+                    saturated = False
+
         for entry in ranked:
             name = entry.option.name
             goal = "defend" if name.startswith("defend:") else "attack"
+            existing = board.squad_for(name)
 
-            if board.squad_for(name) is not None:
+            if existing is not None:
+                self.note(name, f"기존 분대 {existing.id} 유지", True)
+                continue
+
+            shelf = board.shelved.get(name)
+
+            if shelf is not None:
+                left = round(shelf.until - board.time)
+                self.note(name, f"{shelf.reason} · {left}초 뒤 재검토", False)
                 continue
 
             if goal == "defend" and entry.score >= EMERGENCY and not board.free_units:
                 self.draft_for_defense(entry)
 
-            if goal == "attack" and attack_squads >= self.max_attack_squads:
-                continue
+            # 기존 공격 분대가 모두 충분하고 남는 사단이 많으면 한도를 넘어 새 전선을 연다 (몰빵 방지).
+            surplus = saturated and len(board.free_units) > self.group_size * 2
+            reason = "새 분대 편성"
 
-            if not board.free_units and goal == "attack":
+            if goal == "attack" and attack_squads >= self.max_attack_squads:
+                if not surplus:
+                    self.note(name, f"공격 분대 한도 {self.max_attack_squads}개 도달", False)
+                    continue
+
+                reason = f"남는 사단으로 추가 편성 (한도 {self.max_attack_squads}개 초과)"
+                saturated = False
+
+            if not board.free_units:
+                self.note(name, "가용 사단 없음", False)
                 continue
 
             board.new_squad(goal, name, entry.score)
+            self.note(name, reason, True)
 
             if goal == "attack":
                 attack_squads += 1
 
+    def strength(self, squad):
+        """필요 전력 대비 분대 전력 (필요 전력이 0이면 무한대)."""
 
-        # 3. 분대 한도 때문에 남은 사단은 가장 점수 높은 공격 분대의 증원으로 보낸다.
+        required = self.required_power(self.context_for(squad))
+        power = _power(self.blackboard.squad_units(squad))
+
+        if required <= 0:
+            return float("inf")
+
+        return power / required
+
+    def check_strength(self, squad):
+        board = self.blackboard
+        context = self.context_for(squad)
+        units = board.squad_units(squad)
+        required = self.required_power(context)
+
+        if not units or required <= 0:
+            return
+
+        ratio = _power(units) / required
+
+
+        # 1. 너무 약함: 증원을 기다린 뒤에도 MIN_COMMIT 미만이면 목표를 잠시 포기
+        if ratio < MIN_COMMIT and board.time - squad.formed_at >= PATIENCE:
+            reason = f"전력 부족으로 포기 (필요 전력의 {ratio:.0%})"
+            board.shelved[squad.target_key] = Shelved(board.time + SHELVE_SECONDS, reason)
+            board.release(squad)
+
+    def distribute_spare(self):
+        """분대에 못 들어간 사단을 필요 전력 대비 가장 약한 공격 분대에 하나씩 보탠다.
+
+        모든 분대가 OVERKILL 배수를 넘으면 group_size만큼은 예비대로 남기고 나머지는 점수 높은 분대에 몰아준다.
+        """
+
+        board = self.blackboard
+
+
+        # 1. 보탤 수 있는 공격 분대와 현재 충족률
+        needs = []
+
         for squad in board.squads.values():
-            if squad.goal == "attack" and squad.unit_ids:
-                if best_attack is None or squad.score > best_attack.score:
-                    best_attack = squad
+            if squad.goal != "attack" or not squad.unit_ids:
+                continue
 
-        if best_attack is not None:
-            for unit in list(board.free_units):
-                if len(best_attack.unit_ids) >= MAX_SQUAD:
-                    break
-                board.assign(best_attack, unit)
+            required = self.required_power(self.context_for(squad))
+
+            if required > 0:
+                needs.append(Need(squad, _power(board.squad_units(squad)), required))
+
+
+        # 2. 남는 사단을 '가장 모자란 분대'부터 배정
+        for unit in list(board.free_units):
+            spare = len(board.free_units) > self.group_size
+            best = None
+
+            for need in needs:
+                if len(need.squad.unit_ids) >= MAX_SQUAD:
+                    continue
+                if need.ratio >= OVERKILL and not spare:
+                    continue
+                if best is None or _spare_priority(need) < _spare_priority(best):
+                    best = need
+
+            if best is None:
+                break
+
+            board.assign(best.squad, unit)
+            best.power += unit_power(unit)
 
     def draft_for_defense(self, entry):
         """급한 방어: 점수가 낮은 공격 분대의 사단을 풀어 방어에 쓸 수 있게 한다."""
@@ -579,6 +740,8 @@ class AI:
                 weakest = squad
 
         if weakest is not None:
+            reason = f"{entry.option.name} 긴급 방어에 병력 징발"
+            board.shelved[weakest.target_key] = Shelved(board.time + SHELVE_SECONDS, reason)
             board.release(weakest)
 
     # -------------------------------------------------------------- GOAP + HTN
@@ -628,7 +791,9 @@ class AI:
             x, y = self.goal_point(context)
             cx, cy = _centroid(units)
             waited = board.time - squad.formed_at >= PATIENCE
-            state["squad_strong"] = _power(units) >= self.required_power(context) or waited
+            power = _power(units)
+            required = self.required_power(context)
+            state["squad_strong"] = power >= required or (waited and power >= required * MIN_COMMIT)
             state["cohesive"] = _spread(units) <= COHESION
             state["near_target"] = dist((cx, cy), (x, y)) <= ENGAGE_NEAR
 
@@ -637,15 +802,23 @@ class AI:
     def run_squad(self, squad):
         context = self.context_for(squad)
         state = self.facts(context)
+        planned = perf_counter()
         steps = goap.plan(state, GOALS[squad.goal], ACTIONS)
+
+        if self.profiler is not None:
+            self.profiler.add(f"ai{self.side}/goap", perf_counter() - planned)
+
         squad.plan = []
         squad.trace = context.trace
+        squad.facts = state
 
         if steps is None:
             return
 
         for action in steps:
             squad.plan.append(action.name)
+
+        executed = perf_counter()
 
         for action in steps:
             primitives = DOMAIN.decompose(action.name, context)
@@ -663,9 +836,104 @@ class AI:
             if action.name in ONGOING:
                 break
 
+        if self.profiler is not None:
+            self.profiler.add(f"ai{self.side}/htn", perf_counter() - executed)
+
         if not squad.unit_ids and squad.id in self.blackboard.squads:
             # 사단을 못 모은 분대는 다음 생각 때 다시 만든다.
             del self.blackboard.squads[squad.id]
+            self.note(squad.target_key, "편성 실패 · 점수 높은 분대가 가용 사단을 먼저 가져감", False)
+
+    # -------------------------------------------------------------- 디버그 창
+
+    def debug_state(self):
+        """마지막 생각의 결정을 JSON용 dict로."""
+
+        board = self.blackboard
+
+
+        # 1. 목표 순위 (고려 사항별 점수 포함)
+        goals = []
+
+        for entry in self.last_goals:
+            goal = _scored_json(entry, entry.option.name)
+            decision = self.decisions.get(entry.option.name, {"chosen": False, "reason": "검토 안 함"})
+            goal["chosen"] = decision["chosen"]
+            goal["reason"] = decision["reason"]
+            goals.append(goal)
+
+
+        # 2. 생산 순위
+        builds = []
+
+        for entry in self.last_builds:
+            builds.append(_scored_json(entry, entry.option.payload.name))
+
+
+        # 3. 분대: 목표, 병력, 전력/필요 전력, GOAP 사실·계획, HTN 분해
+        squads = []
+
+        for squad in board.squads.values():
+            units = []
+            power = 0.0
+
+            for unit_id in squad.unit_ids:
+                unit = self.game.units.get(unit_id)
+                if unit is not None:
+                    units.append({"id": unit.id, "name": unit.name, "x": round(unit.x, 1), "y": round(unit.y, 1)})
+                    power += unit_power(unit)
+
+            required = None
+
+            if squad.goal == "attack" and squad.target_key in _live_targets(self):
+                required = round(self.required_power(self.context_for(squad)), 1)
+
+            squads.append({
+                "id": squad.id,
+                "goal": squad.goal,
+                "target": squad.target_key,
+                "score": round(squad.score, 3),
+                "age": round(board.time - squad.formed_at, 1),
+                "units": units,
+                "power": round(power, 1),
+                "required": required,
+                "facts": dict(squad.facts),
+                "plan": list(squad.plan),
+                "trace": list(squad.trace),
+                "waypoint": squad.waypoint,
+                "patience_left": round(max(0.0, PATIENCE - (board.time - squad.formed_at)), 1),
+            })
+
+        shelved = []
+
+        for key, shelf in board.shelved.items():
+            shelved.append({"target": key, "reason": shelf.reason, "left": round(shelf.until - board.time, 1)})
+
+
+        # 4. 최종
+        state = {
+            "side": self.side,
+            "profile": {"attack": self.profile.attack, "defend": self.profile.defend,
+                        "build": self.profile.build, "caution": self.profile.caution},
+            "think_interval": self.think,
+            "last_think_at": self.last_think_at,
+            "next_think": self.next_think,
+            "think_ms": self.last_think_ms,
+            "phases": dict(self.last_phases),
+            "resources": round(board.resources, 1),
+            "own_power": round(board.own_power, 1),
+            "enemy_power": round(board.enemy_power, 1),
+            "free_units": len(board.free_units),
+            "threats": len(board.threats),
+            "goals": goals,
+            "builds": builds,
+            "squads": squads,
+            "shelved": shelved,
+            "min_commit": MIN_COMMIT,
+            "overkill": OVERKILL,
+        }
+
+        return state
 
     # -------------------------------------------------------------- 목표 위치·전력
 
@@ -691,3 +959,36 @@ class AI:
         if context.target is None:
             return 0.0
         return self.defense_of(context.target) * self.profile.caution
+
+
+def _scored_json(entry, label):
+    details = {}
+
+    for name, value in entry.details.items():
+        details[name] = round(value, 3)
+
+    return {"name": label, "score": round(entry.score, 4), "details": details}
+
+
+def _live_targets(ai):
+    """분대 표적이 아직 유효한지 (전멸한 적 사단, 이미 점령한 기지가 아닌지)."""
+
+    keys = set()
+
+    for base in ai.blackboard.enemy_bases:
+        keys.add(f"attack:base:{base.id}")
+
+    for unit in ai.game.units.values():
+        if unit.side != ai.side:
+            keys.add(f"attack:unit:{unit.id}")
+
+    return keys
+
+
+def _spare_priority(need):
+    """작을수록 먼저 받는다: OVERKILL 미만 분대는 충족률 낮은 순, 그 위로는 점수 높은 분대 순."""
+
+    if need.ratio < OVERKILL:
+        return (0, need.ratio)
+
+    return (1, -need.squad.score)

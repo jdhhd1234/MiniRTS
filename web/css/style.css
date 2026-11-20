@@ -219,3 +219,30 @@ progress { width: 100%; grid-column: 1 / -1; height: 7px; accent-color: #c9ba82;
 @media (prefers-reduced-motion: reduce) {
   .gacha-result.reveal { animation: none; }
 }
+
+/* 샌드박스 개발자 디버그 창 (F2) */
+.debug-panel {
+  position: absolute; z-index: 2; top: 88px; bottom: 44px; right: 12px; width: min(560px, calc(100% - 24px));
+  display: flex; flex-direction: column; background: #101a18f2; border: 1px solid #3c5a52; border-radius: 8px;
+  font-size: 0.78rem; color: #d8e4df;
+}
+.debug-panel[hidden] { display: none; }
+.debug-panel header { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid #3c5a52; }
+.debug-panel header [role="tablist"] { display: flex; gap: 4px; margin-right: auto; }
+.debug-panel [role="tab"][aria-selected="true"] { background: #3c5a52; }
+.debug-body { overflow: auto; padding: 8px 10px; }
+.debug-section h3 { margin: 10px 0 4px; font-size: 0.9rem; }
+.debug-section h3 small { font-weight: normal; opacity: 0.7; }
+.debug-section h4 { margin: 8px 0 4px; font-size: 0.8rem; opacity: 0.85; }
+.debug-section p { margin: 2px 0; }
+.debug-table { width: 100%; border-collapse: collapse; }
+.debug-table th, .debug-table td { padding: 2px 4px; text-align: left; border-bottom: 1px solid #ffffff14; vertical-align: top; }
+.debug-table tr.chosen td { color: #f2d47a; }
+.debug-table tr.nested td:first-child { padding-left: 16px; opacity: 0.8; }
+.debug-bar { display: inline-block; width: 60px; height: 6px; background: #ffffff1a; border-radius: 3px; vertical-align: middle; }
+.debug-bar i { display: block; height: 100%; background: #6fbf8f; border-radius: 3px; }
+.debug-bar.warn i { background: #e0705a; }
+.debug-panel .chip { display: inline-block; margin: 1px 3px 1px 0; padding: 0 5px; border-radius: 8px; background: #2d4a42; }
+.debug-panel .chip.off { background: #ffffff10; opacity: 0.55; text-decoration: line-through; }
+.debug-squad { margin: 4px 0; padding: 6px; border: 1px solid #ffffff1a; border-radius: 6px; }
+.debug-panel .muted { opacity: 0.6; }
