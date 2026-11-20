@@ -11,6 +11,8 @@ let user;
 let page = "sortie";
 let stage = 1;
 let difficulty = "normal";
+let speed = 1;
+const sandbox = { difficulty: "normal", speed: 1, map: null, mapName: "", script: "", message: "" };
 let draft = [];
 let activeTemplate = 0;
 let busy = false;
@@ -89,7 +91,7 @@ async function loadData() {
   byId = new Map(data.battalions.map((battalion) => [battalion.id, battalion]));
 }
 
-const nav = { sortie: "출격", templates: "편제 편집기", gacha: "가챠", codex: "대대 도감" };
+const nav = { sortie: "출격", sandbox: "샌드박스", templates: "편제 편집기", gacha: "가챠", codex: "대대 도감" };
 
 function openPage(nextPage) {
   page = nextPage;
@@ -116,7 +118,7 @@ function lobby(message = "") {
   });
   root.querySelector("#logout").onclick = () => { session(null); user = null; authScreen(); };
   const content = root.querySelector("#page-content");
-  ({ sortie: sortiePage, templates: templatePage, gacha: gachaPage, codex: codexPage })[page](content, message);
+  ({ sortie: sortiePage, sandbox: sandboxPage, templates: templatePage, gacha: gachaPage, codex: codexPage })[page](content, message);
 }
 
 function sortiePage(content, message) {
@@ -138,6 +140,7 @@ function sortiePage(content, message) {
         <fieldset><legend>AI 난이도</legend><div class="difficulty">
           ${["easy", "normal", "hard"].map((key) => `<button data-difficulty="${key}" aria-pressed="${difficulty === key}">${esc(data.difficulty[key].name)}</button>`).join("")}
         </div></fieldset>
+        <fieldset><legend>시간 배속 · 출격 후에는 바꿀 수 없습니다</legend>${speedButtons(speed)}</fieldset>
         <p class="message" role="status">${esc(message)}</p>
         <button id="sortie" class="primary">출격</button>
       </section>
@@ -148,7 +151,84 @@ function sortiePage(content, message) {
   content.querySelectorAll("[data-difficulty]").forEach((button) => {
     button.onclick = () => { difficulty = button.dataset.difficulty; sortiePage(content, ""); };
   });
-  content.querySelector("#sortie").onclick = startBattle;
+  content.querySelectorAll("[data-speed]").forEach((button) => {
+    button.onclick = () => { speed = Number(button.dataset.speed); sortiePage(content, ""); };
+  });
+  content.querySelector("#sortie").onclick = () => startBattle({ t: "start", mode: "campaign", stage, difficulty, speed });
+}
+
+function speedButtons(current) {
+  return `<div class="difficulty speed-options">${data.rules.speeds.map((value) =>
+    `<button data-speed="${value}" aria-pressed="${value === current}">${value}×</button>`).join("")}</div>`;
+}
+
+function sandboxPage(content, message) {
+  const status = message || sandbox.message;
+  sandbox.message = "";
+  content.innerHTML = `
+    <div class="page-title"><h1>샌드박스</h1><p>직접 만든 맵과 Lua 대대로 자유 전투를 합니다. 포인트 보상과 스테이지 진행은 없습니다.</p></div>
+    <div class="sortie-layout">
+      <section class="panel sandbox-editor">
+        <h2>전장 맵 <small>QGIS GeoJSON · EPSG:4326 · 최대 1200km</small></h2>
+        <div class="file-row">
+          <label class="file-button">GeoJSON 불러오기<input type="file" id="map-file" accept=".geojson,.json,application/geo+json,application/json"></label>
+          <span>${sandbox.map ? esc(sandbox.mapName) : "기본 맵 (서유럽)"}</span>
+          ${sandbox.map ? '<button id="clear-map" class="quiet">기본 맵으로</button>' : ""}
+        </div>
+        <h2>Lua 고유 대대 <small>선택 사항</small></h2>
+        <div class="file-row"><label class="file-button">.lua 불러오기<input type="file" id="script-file" accept=".lua,text/plain"></label></div>
+        <label for="script" class="visually-hidden">Lua 스크립트</label>
+        <textarea id="script" spellcheck="false" rows="18" placeholder="return { battalions = { dragon = { name = &quot;드래곤대대&quot;, cls = &quot;air&quot;, ... } } }">${esc(sandbox.script)}</textarea>
+        <p>형식과 예제: Planner/sandbox/README.md, example.lua, example.geojson</p>
+      </section>
+      <section class="sortie-settings panel">
+        <h2>샌드박스 설정</h2>
+        <p>스크립트에 templates가 있으면 그 편제를, 없으면 저장된 편제를 씁니다. 모든 대대를 사용할 수 있습니다.</p>
+        <fieldset><legend>AI 난이도</legend><div class="difficulty">
+          ${["easy", "normal", "hard"].map((key) => `<button data-difficulty="${key}" aria-pressed="${sandbox.difficulty === key}">${esc(data.difficulty[key].name)}</button>`).join("")}
+        </div></fieldset>
+        <fieldset><legend>시작 배속 · 전투 중에도 바꿀 수 있습니다</legend>${speedButtons(sandbox.speed)}</fieldset>
+        <p class="message" role="status">${esc(status)}</p>
+        <button id="sortie" class="primary">샌드박스 출격</button>
+      </section>
+    </div>`;
+  const redraw = (text = "") => sandboxPage(content, text);
+  const script = content.querySelector("#script");
+  script.oninput = () => { sandbox.script = script.value; };
+  content.querySelectorAll("[data-difficulty]").forEach((button) => {
+    button.onclick = () => { sandbox.difficulty = button.dataset.difficulty; redraw(); };
+  });
+  content.querySelectorAll("[data-speed]").forEach((button) => {
+    button.onclick = () => { sandbox.speed = Number(button.dataset.speed); redraw(); };
+  });
+  content.querySelector("#map-file").onchange = async (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+    try {
+      const parsed = JSON.parse(await file.text());
+      if (parsed?.type !== "FeatureCollection") throw new Error();
+      sandbox.map = parsed;
+      sandbox.mapName = file.name;
+      redraw(`${file.name}을 불러왔습니다. 출격 시 서버에서 검사합니다.`);
+    } catch {
+      redraw("GeoJSON FeatureCollection 파일이 아닙니다.");
+    }
+  };
+  content.querySelector("#clear-map")?.addEventListener("click", () => {
+    sandbox.map = null;
+    sandbox.mapName = "";
+    redraw();
+  });
+  content.querySelector("#script-file").onchange = async (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+    sandbox.script = await file.text();
+    redraw(`${file.name}을 불러왔습니다.`);
+  };
+  content.querySelector("#sortie").onclick = () => startBattle({
+    t: "start", mode: "sandbox", difficulty: sandbox.difficulty, speed: sandbox.speed,
+    map: sandbox.map, script: sandbox.script.trim() ? sandbox.script : null,
+  });
 }
 
 function templatePage(content, message) {
@@ -278,7 +358,7 @@ function loadCatalog() {
   return codexRequest;
 }
 
-function startBattle() {
+function startBattle(start) {
   if (!globalThis.PIXI || !globalThis.ms) {
     lobby("지도 라이브러리를 불러올 수 없습니다. 연결을 확인하고 새로고침해 주세요.");
     return;
@@ -286,12 +366,12 @@ function startBattle() {
   let socket;
   let ended = false;
   const battle = createBattle(root, {
-    data, stage, difficulty,
+    data, stage: start.stage, difficulty: start.difficulty, sandbox: start.mode === "sandbox",
     send(message) { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message)); },
     leave: async () => {
       battle.destroy();
       socket?.close();
-      openPage("sortie");
+      openPage(start.mode === "sandbox" ? "sandbox" : "sortie");
     },
   });
   const url = new URL("/ws/game", location.href);
@@ -303,7 +383,7 @@ function startBattle() {
     battle.disconnect("작전 서버에 연결할 수 없습니다.");
     return;
   }
-  socket.onopen = () => socket.send(JSON.stringify({ t: "start", stage, difficulty }));
+  socket.onopen = () => socket.send(JSON.stringify(start));
   socket.onmessage = ({ data: payload }) => {
     let message;
     try {
@@ -312,7 +392,10 @@ function startBattle() {
         user = message.user;
         ended = true;
       }
-      if (message.t === "error" && !battle.ready) battle.disconnect(message.msg);
+      if (message.t === "error" && !battle.ready) {
+        if (start.mode === "sandbox") sandbox.message = message.msg;
+        battle.disconnect(message.msg);
+      }
       else battle.receive(message);
     } catch (error) {
       console.error(error);

@@ -10,7 +10,7 @@ function clock(seconds) {
 }
 
 export function createBattle(root, options) {
-  const { data, stage, difficulty, send, leave } = options;
+  const { data, stage, difficulty, sandbox, send, leave } = options;
   const battalions = new Map(data.battalions.map(({ id, name }) => [id, name]));
   const weatherNames = new Map(Object.values(data.weather).map(({ id, name }) => [id, name]));
   const frame = document.createElement("section");
@@ -18,12 +18,15 @@ export function createBattle(root, options) {
   frame.innerHTML = `
     <div class="map-host"></div>
     <header class="battle-top">
-      <div class="battle-heading"><div class="brand">Min<span>RTS</span></div><div id="mission-title">${esc(data.stages[stage]?.name)} · 난이도 ${esc(data.difficulty[difficulty]?.name)}</div></div>
+      <div class="battle-heading"><div class="brand">Min<span>RTS</span></div><div id="mission-title">${sandbox ? "샌드박스" : esc(data.stages[stage]?.name)} · 난이도 ${esc(data.difficulty[difficulty]?.name)}</div></div>
       <div class="battle-metrics">
         <div><span>남은 시간</span><strong id="time-left">—</strong></div>
         <div><span>자원 / 수입</span><strong id="resources">—</strong></div>
         <div><span>생산속도</span><strong id="build-speed">—</strong></div>
+        <div><span>배속</span><strong id="speed">—</strong></div>
       </div>
+      ${sandbox ? `<div class="speed-control" role="group" aria-label="시간 배속">${data.rules.speeds.map((value) =>
+        `<button data-speed="${value}">${value}×</button>`).join("")}</div>` : ""}
       <button id="surrender" class="danger" disabled>항복</button>
     </header>
     <aside class="battle-left">
@@ -142,9 +145,11 @@ export function createBattle(root, options) {
       onSelection: (next) => { selected = next; showSelected(); },
       weatherNames,
     });
-    const title = data.stages[init.stage]?.name;
+    for (const { id, name } of init.custom_battalions ?? []) battalions.set(id, name);
+    const title = init.sandbox ? `샌드박스 · ${init.map_name}` : data.stages[init.stage]?.name;
     get("mission-title").textContent = `${title ?? ""} · 난이도 ${data.difficulty[init.difficulty]?.name ?? ""}`;
     get("time-left").textContent = clock(init.match_seconds);
+    showSpeed(init.speed);
     get("production").innerHTML = init.templates.length ? init.templates.map(({ name, cost }, index) =>
       `<button class="build-button" data-build="${index}"><kbd>${index + 1}</kbd><span>${esc(name)}</span><small>${number(cost)}</small></button>`).join("")
       : "<p>로비에서 사단 편제를 저장하세요.</p>";
@@ -165,6 +170,18 @@ export function createBattle(root, options) {
     surrender.disabled = true;
     if (init) updateProduction();
   }
+
+  function showSpeed(value) {
+    get("speed").textContent = `${value}×`;
+    frame.querySelectorAll("[data-speed]").forEach((button) => {
+      button.setAttribute("aria-pressed", String(Number(button.dataset.speed) === value));
+      button.disabled = finished;
+    });
+  }
+
+  frame.querySelectorAll("[data-speed]").forEach((button) => {
+    button.onclick = () => { if (init && !finished) send({ t: "speed", value: Number(button.dataset.speed) }); };
+  });
 
   surrender.onclick = () => {
     if (!init || finished || surrenderRequested || !window.confirm("항복하면 패배로 처리됩니다. 항복하시겠습니까?")) return;
@@ -189,6 +206,7 @@ export function createBattle(root, options) {
           get("time-left").textContent = clock(init.match_seconds - state.time);
           get("resources").textContent = `${number(Math.floor(state.res))} / +${number(state.income)}초당`;
           get("build-speed").textContent = `${number(state.build_speed)}×`;
+          showSpeed(state.speed);
           showTerritory(state.terr);
           showQueue(state.queue);
           showSelected();
@@ -207,7 +225,8 @@ export function createBattle(root, options) {
           break;
         case "end":
           finish();
-          display(`${endReasons[message.reason] ?? ""} · ${number(message.points_earned)} 포인트 획득`,
+          display(sandbox ? (endReasons[message.reason] ?? "")
+            : `${endReasons[message.reason] ?? ""} · ${number(message.points_earned)} 포인트 획득`,
             message.winner === (init?.you ?? 1) ? "작전 승리" : "작전 패배");
           break;
       }

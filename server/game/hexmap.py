@@ -1,5 +1,6 @@
 """Odd-r pointy hex geometry and the deterministic MinRTS playfield."""
 
+from dataclasses import dataclass, field
 from functools import cache, lru_cache
 from heapq import heappop, heappush
 from math import ceil, cos, dist, floor, radians, sin, sqrt
@@ -11,7 +12,7 @@ COLS, ROWS = 60, 69
 WIDTH = HEIGHT = 1200
 R = 20 / sqrt(3)
 DIRECTIONS = ((1, 0), (0, 1), (-1, 1), (-1, 0), (0, -1), (1, -1))
-SEA = TERRAIN["sea"]["id"]
+SEA = TERRAIN["sea"].id
 
 
 def offset_to_axial(col, row):
@@ -28,8 +29,13 @@ def center(col, row):
 
 def vertices(col, row):
     x, y = center(col, row)
-    return tuple((x + R * cos(radians(60 * i - 30)),
-                  y + R * sin(radians(60 * i - 30))) for i in range(6))
+    points = []
+
+    for i in range(6):
+        angle = radians(60 * i - 30)
+        points.append((x + R * cos(angle), y + R * sin(angle)))
+
+    return tuple(points)
 
 
 def pixel_to_hex(x, y):
@@ -37,7 +43,9 @@ def pixel_to_hex(x, y):
     qf = (sqrt(3) / 3 * px - py / 3) / R
     rf = (2 / 3 * py) / R
     sf = -qf - rf
-    q, r, s = (floor(value + 0.5) for value in (qf, rf, sf))
+    q = floor(qf + 0.5)
+    r = floor(rf + 0.5)
+    s = floor(sf + 0.5)
     dq, dr, ds = abs(q - qf), abs(r - rf), abs(s - sf)
     if dq > dr and dq > ds:
         q = -r - s
@@ -54,22 +62,43 @@ def lonlat_to_world(lon, lat):
     return lon * 72.5, (54.5 - lat) * 111
 
 
-OFFSETS = tuple((i % COLS, i // COLS) for i in range(COLS * ROWS))
-CENTERS = tuple(center(*cell) for cell in OFFSETS)
-AXIAL = tuple(offset_to_axial(*cell) for cell in OFFSETS)
-
-
 def _neighbors(q, r):
-    return tuple(index(*axial_to_offset(q + dq, r + dr)) for dq, dr in DIRECTIONS)
+    cells = []
+
+    for dq, dr in DIRECTIONS:
+        col, row = axial_to_offset(q + dq, r + dr)
+        cells.append(index(col, row))
+
+    return tuple(cells)
 
 
-# Neighbor slots retain their direction at the edge of the map.
-NEIGHBORS = tuple(_neighbors(*cell) for cell in AXIAL)
+def _build_grid():
+    offsets = []
+    centers = []
+    axial = []
+    neighbors = []
+
+    for i in range(COLS * ROWS):
+        col, row = i % COLS, i // COLS
+        q, r = offset_to_axial(col, row)
+
+        offsets.append((col, row))
+        centers.append(center(col, row))
+        axial.append((q, r))
+        # Neighbor slots retain their direction at the edge of the map.
+        neighbors.append(_neighbors(q, r))
+
+    return tuple(offsets), tuple(centers), tuple(axial), tuple(neighbors)
+
+
+OFFSETS, CENTERS, AXIAL, NEIGHBORS = _build_grid()
 
 
 def hex_distance(a, b):
-    dq = AXIAL[a][0] - AXIAL[b][0]
-    dr = AXIAL[a][1] - AXIAL[b][1]
+    aq, ar = AXIAL[a]
+    bq, br = AXIAL[b]
+    dq = aq - bq
+    dr = ar - br
     return max(abs(dq), abs(dr), abs(dq + dr))
 
 
@@ -152,7 +181,12 @@ RIVERS = {
               (6.02,51.37),(5.87,51.74),(5.15,51.82)],
 }
 
-CITIES = [(name, lon, lat) for _, _, name, lon, lat in BASES] + [
+CITIES = []
+
+for _side, _kind, _name, _lon, _lat in BASES:
+    CITIES.append((_name, _lon, _lat))
+
+CITIES += [
     ("런던",-.127,51.51),("캔터베리",1.08,51.28),("도버",1.31,51.13),
     ("릴",3.06,50.63),("루앙",1.10,49.44),("오를레앙",1.91,47.90),
     ("투르",.69,47.39),("클레르몽페랑",3.09,45.78),("그르노블",5.72,45.19),
@@ -172,6 +206,24 @@ CITIES = [(name, lon, lat) for _, _, name, lon, lat in BASES] + [
 ]
 
 
+def trace_line(points):
+    """월드 좌표(km) 폴리라인이 지나는 셀 목록. 구간을 3km 간격으로 샘플링해 끊김이 없다.
+
+    맵 밖 지점은 None으로 들어간다.
+    """
+
+    cells = []
+
+    for (ax, ay), (bx, by) in zip(points, points[1:]):
+        steps = max(1, ceil(dist((ax, ay), (bx, by)) / 3))
+
+        for step in range(steps + 1):
+            u = step / steps
+            cells.append(index(*pixel_to_hex(ax + u * (bx - ax), ay + u * (by - ay))))
+
+    return cells
+
+
 def _inside(lon, lat, polygon):
     inside = False
     for (ax, ay), (bx, by) in zip(polygon, polygon[1:] + polygon[:1]):
@@ -180,45 +232,79 @@ def _inside(lon, lat, polygon):
     return inside
 
 
+def _in_sea(lon, lat):
+    for polygon in SEA_MASKS.values():
+        if _inside(lon, lat, polygon):
+            return True
+
+    return False
+
+
+def _in_regions(lon, lat, regions):
+    for a, b, rx, ry in regions:
+        if ((lon - a) / rx) ** 2 + ((lat - b) / ry) ** 2 <= 1:
+            return True
+
+    return False
+
+
 @cache
 def generate_map():
     rng = Random(41069)
-    noise = {(x, y): rng.random() for x in range(22) for y in range(25)}
+
+    # 1. 숲 분포용 노이즈 격자 (난수 순서 유지: x 바깥, y 안쪽)
+    noise = {}
+
+    for x in range(22):
+        for y in range(25):
+            noise[x, y] = rng.random()
+
+
+    # 2. 셀별 기본 지형
     terrain = []
+
     for x, y in CENTERS:
         lon, lat = x / 72.5, 54.5 - y / 111
-        if any(_inside(lon, lat, polygon) for polygon in SEA_MASKS.values()):
+
+        if _in_sea(lon, lat):
             terrain.append(SEA)
             continue
+
         nx, ny = x / 60, y / 55
         i, j = floor(nx), floor(ny)
         u, v = nx - i, ny - j
         forest = ((noise[i, j] * (1-u) + noise[i+1, j] * u) * (1-v)
                   + (noise[i, j+1] * (1-u) + noise[i+1, j+1] * u) * v)
         kind = "forest" if forest + rng.uniform(-0.10, 0.10) > 0.60 else "plain"
+
         for _, relief, regions in RELIEF:
-            if any(((lon-a)/rx)**2 + ((lat-b)/ry)**2 <= 1 for a, b, rx, ry in regions):
+            if _in_regions(lon, lat, regions):
                 kind = relief
                 break
-        terrain.append(TERRAIN[kind]["id"])
 
-    # Oversample each river segment so the hex course stays continuous.
+        terrain.append(TERRAIN[kind].id)
+
+
+    # 3. 강
     for river in RIVERS.values():
-        points = [lonlat_to_world(*point) for point in river]
-        for (ax, ay), (bx, by) in zip(points, points[1:]):
-            steps = max(1, ceil(dist((ax, ay), (bx, by)) / 3))
-            for step in range(steps + 1):
-                u = step / steps
-                cell = index(*pixel_to_hex(ax + u * (bx - ax), ay + u * (by - ay)))
-                if cell is not None and terrain[cell] != SEA:
-                    terrain[cell] = TERRAIN["river"]["id"]
+        points = []
 
+        for lon, lat in river:
+            points.append(lonlat_to_world(lon, lat))
+
+        for cell in trace_line(points):
+            if cell is not None and terrain[cell] != SEA:
+                terrain[cell] = TERRAIN["river"].id
+
+
+    # 4. 도시
     cities = []
+
     for name, lon, lat in CITIES:
         col, row = pixel_to_hex(*lonlat_to_world(lon, lat))
         cell = index(col, row)
         if cell is not None and 0 <= lon * 72.5 < WIDTH:
-            terrain[cell] = TERRAIN["city"]["id"]
+            terrain[cell] = TERRAIN["city"].id
             cities.append((name, col, row))
     return tuple(terrain), tuple(cities)
 
@@ -226,38 +312,99 @@ def generate_map():
 def movement_factor(kind, engineer=False, mountain=False):
     if mountain and kind in ("mountain", "highland"):
         return 1.0
-    speed = TERRAIN[kind]["move"]
+    speed = TERRAIN[kind].move
     return (1 + speed) / 2 if engineer and speed else speed
 
 
-@lru_cache(maxsize=4096)
-def find_path(start, goal, engineer=False, mountain=False):
-    """Return waypoint indices excluding start, or None if unreachable."""
-    terrain, _ = generate_map()
-    if not all(0 <= cell < len(terrain) and terrain[cell] != SEA for cell in (start, goal)):
-        return None
-    costs = {ident: 1 / movement_factor(kind, engineer, mountain)
-             for ident, kind in TERRAIN_BY_ID.items() if ident != SEA}
-    frontier = [(hex_distance(start, goal), 0.0, start)]
-    previous = {}
-    best = {start: 0.0}
-    while frontier:
-        _, cost, cell = heappop(frontier)
-        if cell == goal:
-            path = []
-            while cell != start:
-                path.append(cell)
-                cell = previous[cell]
-            return tuple(reversed(path))
-        if cost > best[cell]:
-            continue
-        for neighbor in NEIGHBORS[cell]:
-            if neighbor is None or terrain[neighbor] == SEA:
+def move_profile(engineer=False, mountain=False):
+    """지형 id 순서의 이동 배율 튜플. 0이면 통행 불가."""
+
+    profile = []
+
+    for ident in range(len(TERRAIN_BY_ID)):
+        profile.append(movement_factor(TERRAIN_BY_ID[ident], engineer, mountain))
+
+    return tuple(profile)
+
+
+class Pathfinder:
+    """한 맵의 지형에 대한 A* 경로 탐색. 결과는 (출발, 도착, 이동 배율)별로 캐시한다."""
+
+    def __init__(self, terrain):
+        self.terrain = terrain
+        self.find = lru_cache(maxsize=4096)(self._find)
+
+    def _find(self, start, goal, profile):
+        """Return waypoint indices excluding start, or None if unreachable."""
+        terrain = self.terrain
+
+        for cell in (start, goal):
+            if not 0 <= cell < len(terrain) or profile[terrain[cell]] <= 0:
+                return None
+
+        costs = []
+
+        for factor in profile:
+            costs.append(1 / factor if factor > 0 else None)
+
+        frontier = [(hex_distance(start, goal), 0.0, start)]
+        previous = {}
+        best = {start: 0.0}
+        while frontier:
+            _, cost, cell = heappop(frontier)
+            if cell == goal:
+                path = []
+                while cell != start:
+                    path.append(cell)
+                    cell = previous[cell]
+                return tuple(reversed(path))
+            if cost > best[cell]:
                 continue
-            # A center-to-center step spends half its distance in each tile.
-            new_cost = cost + (costs[terrain[cell]] + costs[terrain[neighbor]]) / 2
-            if new_cost < best.get(neighbor, float("inf")):
-                previous[neighbor] = cell
-                best[neighbor] = new_cost
-                heappush(frontier, (new_cost + hex_distance(neighbor, goal), new_cost, neighbor))
-    return None
+            for neighbor in NEIGHBORS[cell]:
+                if neighbor is None or costs[terrain[neighbor]] is None:
+                    continue
+                # A center-to-center step spends half its distance in each tile.
+                new_cost = cost + (costs[terrain[cell]] + costs[terrain[neighbor]]) / 2
+                if new_cost < best.get(neighbor, float("inf")):
+                    previous[neighbor] = cell
+                    best[neighbor] = new_cost
+                    heappush(frontier, (new_cost + hex_distance(neighbor, goal), new_cost, neighbor))
+        return None
+
+
+@dataclass(frozen=True)
+class BaseSpot:
+    side: int
+    kind: str
+    name: str
+    cell: int
+
+
+@dataclass
+class MapData:
+    """한 판의 전장: 지형, 도시 라벨, 기지 배치."""
+    terrain: tuple
+    cities: tuple        # (이름, col, row)
+    bases: tuple         # BaseSpot
+    name: str = "서유럽"
+    pathfinder: Pathfinder = field(init=False, repr=False)
+
+    def __post_init__(self):
+        self.pathfinder = Pathfinder(self.terrain)
+
+
+@cache
+def default_map():
+    terrain, cities = generate_map()
+    bases = []
+
+    for side, kind, name, lon, lat in BASES:
+        cell = index(*pixel_to_hex(*lonlat_to_world(lon, lat)))
+        bases.append(BaseSpot(side, kind, name, cell))
+
+    return MapData(terrain, cities, tuple(bases))
+
+
+def find_path(start, goal, engineer=False, mountain=False):
+    """기본 맵 경로. Return waypoint indices excluding start, or None if unreachable."""
+    return default_map().pathfinder.find(start, goal, move_profile(engineer, mountain))

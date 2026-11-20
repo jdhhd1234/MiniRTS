@@ -45,16 +45,18 @@ def check_reference(card_id, battalion, stats, cost, warnings):
         return
 
     for label, key in REFERENCE_FIELDS.items():
+        expected = getattr(baseline, key)
+
         if key == "cost":
             match = re.search(rf"자원\s+{VALUE}", cost)
         else:
             match = re.search(rf"(?:^|·)\s*{label}\s+{VALUE}", stats)
         if match is None:
             warnings.append(f"{card_id}: cannot read {label}")
-        elif Decimal(match[1]) != Decimal(str(baseline[key])):
+        elif Decimal(match[1]) != Decimal(str(expected)):
             warnings.append(
                 f"{card_id} ({battalion}): {label} is {match[1]} in the design, "
-                f"{baseline[key]} in data.py"
+                f"{expected} in data.py"
             )
 
 
@@ -65,7 +67,11 @@ def parse_equipment(section, warnings):
     for position, header in enumerate(headers):
         card_id, category, name = header.groups()
         end = headers[position + 1].start() if position + 1 < len(headers) else len(section)
-        fields = {label: value.strip() for label, value in BULLET.findall(section, header.end(), end)}
+        fields = {}
+
+        for label, value in BULLET.findall(section, header.end(), end):
+            fields[label] = value.strip()
+
         missing = expected.difference(fields)
         if missing:
             warnings.append(f"{card_id}: missing fields {', '.join(sorted(missing))}")
@@ -73,11 +79,17 @@ def parse_equipment(section, warnings):
         battalion = match[1] if match else ""
         check_reference(card_id, battalion, fields.get("대대 Lv.1 참조", ""),
                         fields.get("생산비", ""), warnings)
-        parts = fields.get("주요 구성품", "").removesuffix(".").split("·")
+
+        parts = []
+
+        for part in fields.get("주요 구성품", "").removesuffix(".").split("·"):
+            if part.strip():
+                parts.append(part.strip())
+
         cards.append({
             "id": card_id, "category": category, "name": name.strip(),
             "role": fields.get("역할", ""), "battalion": battalion,
-            "parts": [part.strip() for part in parts if part.strip()],
+            "parts": parts,
             "axis": fields.get("비교 축", "").removesuffix("."),
             "scope": fields.get("적용 범위", ""),
         })
@@ -90,7 +102,11 @@ def parse_parts(section, warnings):
         line = line.strip()
         if not re.match(r"^\|\s*PART-", line):
             continue
-        columns = [column.strip() for column in line.strip("|").split("|")]
+        columns = []
+
+        for column in line.strip("|").split("|"):
+            columns.append(column.strip())
+
         match = PART_ID.fullmatch(columns[0])
         if match is None or len(columns) != 5:
             warnings.append(f"Malformed part row: {line}")
@@ -110,7 +126,12 @@ def build(markdown):
     for records, expected, label in ((equipment, 70, "equipment"), (parts, 110, "parts")):
         if len(records) != expected:
             warnings.append(f"Expected {expected} {label}, found {len(records)}")
-    for entry_id, count in Counter(entry["id"] for entry in equipment + parts).items():
+    counts = Counter()
+
+    for entry in equipment + parts:
+        counts[entry["id"]] += 1
+
+    for entry_id, count in counts.items():
         if count > 1:
             warnings.append(f"Duplicate ID {entry_id} ({count} occurrences)")
     return {"categories": CATEGORIES, "tags": TAGS, "equipment": equipment, "parts": parts}, warnings

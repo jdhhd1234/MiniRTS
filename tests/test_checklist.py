@@ -23,8 +23,8 @@ from server.game import data  # noqa: E402
 from server.game import hexmap as world  # noqa: E402
 from server.game.sim import Game, Unit, TICK_HZ  # noqa: E402
 
-FOG = data.WEATHER["fog"]["id"]
-CLEAR = data.WEATHER["clear"]["id"]
+FOG = data.WEATHER["fog"].id
+CLEAR = data.WEATHER["clear"].id
 ALL_UNLOCKED = {k: 1 for k in data.BATTALIONS}
 
 
@@ -35,11 +35,11 @@ def new_game(**kw):
 
 
 def plain_cell(game):
-    return next(i for i, t in enumerate(game.terrain) if t == data.TERRAIN["plain"]["id"])
+    return next(i for i, t in enumerate(game.terrain) if t == data.TERRAIN["plain"].id)
 
 
 def make_unit(game, battalions, side=1, levels=None, cell=None):
-    return game.spawn(side, {"name": "시험", "battalions": list(battalions)}, cell if cell is not None else plain_cell(game))
+    return game.spawn(side, game._template("시험", battalions), cell if cell is not None else plain_cell(game))
 
 
 def no_random(game):
@@ -51,7 +51,7 @@ class Roster(unittest.TestCase):
         self.assertEqual(len(data.BATTALIONS), 20)
 
     def test_6_base_14_gacha(self):
-        base = [k for k, v in data.BATTALIONS.items() if v["rarity"] == "base"]
+        base = [k for k, v in data.BATTALIONS.items() if v.rarity == "base"]
         self.assertEqual(len(base), 6)
         self.assertEqual(len(data.BATTALIONS) - len(base), 14)
 
@@ -83,7 +83,7 @@ class Templates(unittest.TestCase):
             db = Database(Path(d) / "t.db")
             db.initialize()
             reg = db.register("tester", "pw123456")
-            uid, _ = db.authenticate(reg["token"])
+            uid = db.authenticate(reg["token"]).user_id
             with self.assertRaises(AccountError):
                 db.save_templates(uid, [{"name": "x", "battalions": ["tank"] * 3}])
             with self.assertRaises(AccountError):
@@ -94,9 +94,9 @@ class Duplicates(unittest.TestCase):
     def test_duplicate_counts_in_cost_and_stats(self):
         g = new_game()
         t = g._template("x", ["tank", "tank"])
-        self.assertEqual(t["cost"], 2 * data.BATTALIONS["tank"]["cost"])
+        self.assertEqual(t.cost, 2 * data.BATTALIONS["tank"].cost)
         u = make_unit(g, ["tank", "tank"])
-        self.assertAlmostEqual(u.mhp, 2 * data.BATTALIONS["tank"]["hp"])
+        self.assertAlmostEqual(u.mhp, 2 * data.BATTALIONS["tank"].hp)
 
     def test_duplicate_support_effect_applied_once(self):
         g = new_game()
@@ -127,12 +127,12 @@ class Levels(unittest.TestCase):
     def test_tank_lv3(self):
         g = new_game(unlocks={**ALL_UNLOCKED, "tank": 3})
         u = make_unit(g, ["tank"])
-        self.assertAlmostEqual(u.attack[0][1], 24.2)
+        self.assertAlmostEqual(u.attack[0].atk, 24.2)
         self.assertAlmostEqual(u.defense, 17.6)
         self.assertAlmostEqual(u.mhp, 132)
         self.assertEqual(u.speed, 2.2)
-        self.assertEqual(u.attack[0][2], 20)
-        self.assertEqual(g._template("x", ["tank"])["cost"], 50)
+        self.assertEqual(u.attack[0].rng, 20)
+        self.assertEqual(g._template("x", ["tank"]).cost, 50)
 
 
 class Production(unittest.TestCase):
@@ -274,7 +274,7 @@ class Victory(unittest.TestCase):
             db = Database(Path(d) / "t.db")
             db.initialize()
             reg = db.register("tester", "pw123456")
-            uid, _ = db.authenticate(reg["token"])
+            uid = db.authenticate(reg["token"]).user_id
             self.assertEqual(db.finish_match(uid, 1, 2)["max_stage"], 1)   # 패배는 저장 안 함
             self.assertEqual(db.finish_match(uid, 1, 1)["max_stage"], 2)
             self.assertEqual(db.finish_match(uid, 3, 1)["max_stage"], 3)   # 최대 3
@@ -287,14 +287,14 @@ class Gacha(unittest.TestCase):
         total = (len(data.BATTALIONS) - len(unlocks)) + len(data.BATTALIONS) * (data.MAX_LEVEL - 1)
         for _ in range(total):
             r = gacha.pull(unlocks, rng)
-            self.assertIn(r["kind"], ("unlock", "upgrade"))
-            self.assertIn(r["battalion"], data.BATTALIONS)
-            if r["kind"] == "unlock":
-                self.assertNotIn(r["battalion"], unlocks)
-                self.assertEqual(r["level"], 1)
+            self.assertIn(r.kind, ("unlock", "upgrade"))
+            self.assertIn(r.battalion, data.BATTALIONS)
+            if r.kind == "unlock":
+                self.assertNotIn(r.battalion, unlocks)
+                self.assertEqual(r.level, 1)
             else:
-                self.assertEqual(r["level"], unlocks[r["battalion"]] + 1)
-            unlocks[r["battalion"]] = r["level"]
+                self.assertEqual(r.level, unlocks[r.battalion] + 1)
+            unlocks[r.battalion] = r.level
         self.assertEqual(set(unlocks.values()), {data.MAX_LEVEL})
         with self.assertRaises(ValueError):   # 전부 최고 레벨이면 더 뽑을 수 없음
             gacha.pull(unlocks, rng)

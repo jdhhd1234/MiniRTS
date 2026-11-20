@@ -283,7 +283,7 @@ export function createMap(host, init, options) {
       if (dragged) return;
       const { col, row } = hexAt((point.x - camera.x) / camera.zoom, (point.y - camera.y) / camera.zoom);
       const ids = ownIds();
-      if (ids.length && col >= 0 && col < cols && row >= 0 && row < rows && terrain[row * cols + col] !== 0) {
+      if (ids.length && col >= 0 && col < cols && row >= 0 && row < rows && (terrain[row * cols + col] !== 0 || init.sandbox)) {
         options.send({ t: "move", ids, col, row });
       }
       return;

@@ -1,6 +1,7 @@
 """SQLite accounts, bearer sessions, and atomic account mutations."""
 
 from contextlib import closing, contextmanager
+from dataclasses import asdict, dataclass
 from hashlib import pbkdf2_hmac, sha256
 from hmac import compare_digest
 import json
@@ -19,6 +20,13 @@ class AccountError(ValueError):
     def __init__(self, message, status=400):
         super().__init__(message)
         self.status = status
+
+
+@dataclass(frozen=True)
+class Session:
+    """로그인 토큰으로 확인한 계정: DB id와 API용 사용자 정보."""
+    user_id: int
+    user: dict
 
 
 def _password_hash(password, salt):
@@ -85,7 +93,7 @@ class Database:
         username, password = self._credentials(username, password)
         salt = secrets.token_bytes(16)
         digest = _password_hash(password, salt)
-        unlocks = {key: 1 for key in data.BASE_UNLOCKED}
+        unlocks = dict.fromkeys(data.BASE_UNLOCKED, 1)
         with self.connection(write=True) as conn:
             cursor = conn.execute("""
                 INSERT INTO users(username, salt, password_hash, points, max_stage, unlocks, templates)
@@ -132,7 +140,7 @@ class Database:
             """, (_token_hash(token),)).fetchone()
             if row is None:
                 raise AccountError("유효하지 않은 로그인입니다.", 401)
-            return row["id"], _user(row)
+            return Session(row["id"], _user(row))
 
     def save_templates(self, user_id, templates):
         if not isinstance(templates, list) or len(templates) > data.MAX_TEMPLATES:
@@ -140,22 +148,33 @@ class Database:
         with self.connection(write=True) as conn:
             user = _user(self._by_id(conn, user_id))
             clean = []
+
             for template in templates:
                 if not isinstance(template, dict):
                     raise AccountError("편제 형식이 올바르지 않습니다.")
+
                 name, battalions = template.get("name"), template.get("battalions")
+
                 if not isinstance(name, str) or not name.strip():
                     raise AccountError("편제 이름을 입력해 주세요.")
+
                 try:
                     name.encode()
                 except UnicodeError as exc:
                     raise AccountError("편제 이름에 사용할 수 없는 문자가 있습니다.") from exc
-                if isinstance(battalions, list) and any(not isinstance(b, str) for b in battalions):
-                    raise AccountError("대대 식별자가 올바르지 않습니다.")
+
+                if isinstance(battalions, list):
+                    for key in battalions:
+                        if not isinstance(key, str):
+                            raise AccountError("대대 식별자가 올바르지 않습니다.")
+
                 error = data.validate_template(battalions, user["unlocks"])
+
                 if error:
                     raise AccountError(error)
+
                 clean.append({"name": name.strip(), "battalions": battalions})
+
             conn.execute("UPDATE users SET templates = ? WHERE id = ?", (json.dumps(clean), user_id))
             return _user(self._by_id(conn, user_id))
 
@@ -168,10 +187,10 @@ class Database:
                 result = gacha.pull(user["unlocks"])
             except ValueError as exc:
                 raise AccountError(str(exc)) from exc
-            user["unlocks"][result["battalion"]] = result["level"]
+            user["unlocks"][result.battalion] = result.level
             conn.execute("UPDATE users SET points = points - ?, unlocks = ? WHERE id = ?",
                          (data.GACHA_COST, json.dumps(user["unlocks"]), user_id))
-            return {"result": result, "user": _user(self._by_id(conn, user_id))}
+            return {"result": asdict(result), "user": _user(self._by_id(conn, user_id))}
 
     def add_points(self, user_id, points):
         with self.connection(write=True) as conn:

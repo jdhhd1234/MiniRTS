@@ -92,6 +92,20 @@ small { color: var(--muted); }
 .sortie-settings fieldset { margin: 23px 0 12px; border: 0; padding: 0; }
 .sortie-settings legend { margin-bottom: 9px; color: var(--muted); }
 .difficulty { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.difficulty.speed-options { grid-template-columns: repeat(5, 1fr); }
+.sandbox-editor { display: grid; gap: 12px; padding: 23px; }
+.sandbox-editor textarea {
+  width: 100%; min-height: 300px; resize: vertical; padding: 12px; color: inherit; background: #18211e;
+  border: 1px solid var(--line); border-radius: 4px; font: 0.85rem/1.5 ui-monospace, Consolas, monospace; tab-size: 2;
+}
+.file-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; color: var(--muted); }
+.file-button { display: inline-block; padding: 9px 14px; border: 1px solid var(--line); border-radius: 4px; cursor: pointer; }
+.file-button:focus-within { outline: 2px solid #f1ddab; outline-offset: 2px; }
+.file-button input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.speed-control { display: flex; gap: 4px; }
+.speed-control button { padding: 6px 9px; font-size: 0.8rem; }
+.speed-control button[aria-pressed="true"] { border-color: #f1ddab; color: #f1ddab; }
 .sortie-settings .primary { width: 100%; margin-top: 10px; }
 .editor-layout { grid-template-columns: 230px minmax(0, 1fr); }
 .editor-sidebar { display: grid; gap: 8px; }
