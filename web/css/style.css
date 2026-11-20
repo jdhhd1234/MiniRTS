@@ -104,6 +104,7 @@ small { color: var(--muted); }
 .file-button input { position: absolute; width: 1px; height: 1px; opacity: 0; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 .speed-control { display: flex; gap: 4px; }
+.check-row { display: flex; gap: 8px; align-items: center; margin-top: 12px; color: var(--muted); cursor: pointer; }
 .speed-control button { padding: 6px 9px; font-size: 0.8rem; }
 .speed-control button[aria-pressed="true"] { border-color: #f1ddab; color: #f1ddab; }
 .sortie-settings .primary { width: 100%; margin-top: 10px; }

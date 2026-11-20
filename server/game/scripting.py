@@ -39,6 +39,10 @@ NUMBER_FIELDS = (
     ("cost", 1, 1000),
 )
 HOOK_NAMES = ("on_attack", "on_damaged", "on_tick")
+MAX_START_DIVISIONS = 30
+AI_SIDES = {"player": 1, "enemy": 2}
+# (필드, 최소, 최대) : AI 성향 가중치 (brain.AIProfile)
+AI_FIELDS = (("attack", 0, 5), ("defend", 0, 5), ("build", 0, 5), ("caution", 0.1, 5))
 
 SETUP = r"""
 local sethook, pcall, error, load, pack = debug.sethook, pcall, error, load, table.pack
@@ -173,8 +177,10 @@ class Hooks:
 class ScriptResult:
     battalions: dict              # id -> data.Battalion
     templates: list | None        # [{"name", "battalions"}], 없으면 None
-    enemy_templates: list | None  # [[대대 id, ...]], 없으면 None
+    enemy_templates: list | None  # [{"name", "battalions"}], 없으면 None
     sandbox: Sandbox
+    start: dict = None            # 진영 -> 시작 사단 수(int) 또는 편제 이름 목록
+    ai_profiles: dict = None      # 진영 -> {가중치 이름: 값}
 
 
 def _is_table(value):
@@ -306,6 +312,54 @@ def _templates(value, where):
     return templates
 
 
+def _start(value, where):
+    """시작 사단: 숫자(편제를 돌아가며 그 수만큼) 또는 편제 이름 배열."""
+
+    if isinstance(value, bool):
+        raise ScriptError(f"{where}: 숫자 또는 편제 이름 배열이어야 합니다.")
+
+    if isinstance(value, (int, float)):
+        if value != int(value) or not 0 <= value <= MAX_START_DIVISIONS:
+            raise ScriptError(f"{where}: 0~{MAX_START_DIVISIONS} 사이 정수여야 합니다.")
+        return int(value)
+
+    names = _string_list(value, where)
+
+    if len(names) > MAX_START_DIVISIONS:
+        raise ScriptError(f"{where}: 최대 {MAX_START_DIVISIONS}개 사단까지입니다.")
+
+    return names
+
+
+def _ai_profiles(value):
+    if not _is_table(value):
+        raise ScriptError("ai: { player = {...}, enemy = {...} } 테이블이어야 합니다.")
+
+    profiles = {}
+
+    for key, table in value.items():
+        if key not in AI_SIDES:
+            raise ScriptError(f"ai.{key}: player 또는 enemy만 쓸 수 있습니다.")
+        if not _is_table(table):
+            raise ScriptError(f"ai.{key}: 테이블이어야 합니다.")
+
+        weights = {}
+
+        for name, low, high in AI_FIELDS:
+            number = table[name]
+
+            if number is None:
+                continue
+            if isinstance(number, bool) or not isinstance(number, (int, float)) or not low <= number <= high:
+                raise ScriptError(f"ai.{key}.{name}: {low}~{high} 사이 숫자여야 합니다.")
+
+            weights[name] = float(number)
+
+        profiles[AI_SIDES[key]] = weights
+
+    return profiles
+
+
 def load(code):
     """스크립트를 실행해 고유 대대·편제를 읽는다. 오류는 ScriptError."""
 
@@ -347,9 +401,19 @@ def load(code):
     enemy_templates = None
 
     if result["enemy_templates"] is not None:
-        enemy_templates = []
+        enemy_templates = _templates(result["enemy_templates"], "enemy_templates")
 
-        for template in _templates(result["enemy_templates"], "enemy_templates"):
-            enemy_templates.append(template["battalions"])
 
-    return ScriptResult(battalions, templates, enemy_templates, sandbox)
+    # 3. 시작 사단과 AI 성향
+    start = {}
+
+    for key, side in (("player_start", 1), ("enemy_start", 2)):
+        if result[key] is not None:
+            start[side] = _start(result[key], key)
+
+    profiles = {}
+
+    if result["ai"] is not None:
+        profiles = _ai_profiles(result["ai"])
+
+    return ScriptResult(battalions, templates, enemy_templates, sandbox, start, profiles)

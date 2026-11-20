@@ -22,12 +22,12 @@ def example_map():
     return json.loads((EXAMPLES / "example.geojson").read_text(encoding="utf-8"))
 
 
-def example_script():
-    return (EXAMPLES / "example.lua").read_text(encoding="utf-8")
+def example_script(name="bots.lua"):
+    return (EXAMPLES / name).read_text(encoding="utf-8")
 
 
-def sandbox_game(map_json=None, script=None, speed=1, seed=1):
-    setup = sandbox.build(map_json, script, USER)
+def sandbox_game(map_json=None, script=None, speed=1, seed=1, bots=False):
+    setup = sandbox.build(map_json, script, USER, bots)
     return Game(None, "normal", setup.templates, setup.levels, seed=seed, speed=speed,
                 scenario=setup.scenario)
 
@@ -122,12 +122,16 @@ class GeoMap(unittest.TestCase):
 
 
 class LuaBattalions(unittest.TestCase):
-    def test_example_script(self):
+    def test_example_scripts(self):
+        for name in ("example.lua", "bots.lua"):
+            with self.subTest(name=name):
+                sandbox_game(example_map(), example_script(name))
+
         result = scripting.load(example_script())
         self.assertEqual(set(result.battalions), {"dragon", "mage"})
         self.assertEqual(result.battalions["dragon"].move["sea"], 1.0)
-        self.assertEqual(len(result.templates), 4)
-        self.assertEqual(len(result.enemy_templates), 2)
+        self.assertEqual(result.start, {1: ["비룡사단", "용기병사단", "용기병사단"], 2: 4})
+        self.assertEqual(result.ai_profiles[2]["caution"], 1.5)
 
     def test_dragon_crosses_sea(self):
         game = sandbox_game(example_map(), example_script())
@@ -192,6 +196,116 @@ class LuaBattalions(unittest.TestCase):
         script = "return { templates = { { name = 'A', battalions = { 'ghost' } } } }"
         with self.assertRaisesRegex(ValueError, "ghost"):
             sandbox.build(None, script, USER)
+
+
+class EnemyLuaAndBots(unittest.TestCase):
+    def test_enemy_setup_from_lua(self):
+        game = sandbox_game(example_map(), example_script())
+        names = []
+        for template in game.templates[2]:
+            names.append(template.name)
+        self.assertEqual(names, ["마도사단", "마법보병사단"])
+
+        counts = {1: 0, 2: 0}
+        enemy_has_mage = False
+        for unit in game.units.values():
+            counts[unit.side] += 1
+            if unit.side == 2 and "mage" in unit.b:
+                enemy_has_mage = True
+        self.assertEqual(counts, {1: 3, 2: 4})
+        self.assertTrue(enemy_has_mage)
+        self.assertEqual(game.ai.profile.defend, 1.5)
+
+    def test_unknown_start_template(self):
+        script = "return { enemy_start = { 'ghost' } }"
+        with self.assertRaisesRegex(ValueError, "ghost"):
+            sandbox.build(None, script, USER)
+
+    def test_bad_ai_profile(self):
+        with self.assertRaisesRegex(scripting.ScriptError, "ai.enemy.attack"):
+            scripting.load("return { ai = { enemy = { attack = 99 } } }")
+
+    def test_bot_battle(self):
+        game = sandbox_game(example_map(), example_script(), bots=True)
+        self.assertTrue(game.init_message()["bots"])
+        self.assertEqual(game.bot.profile.attack, 1.4)
+
+        with self.assertRaisesRegex(ValueError, "봇전투"):
+            game.command({"t": "build", "template": 0})
+
+        game.command({"t": "speed", "value": 20})
+        moved = set()
+
+        for _ in range(900):
+            game.tick()
+            for unit in game.units.values():
+                if unit.path:
+                    moved.add(unit.side)
+
+        self.assertEqual(moved, {1, 2})   # 양쪽 AI가 모두 지휘한다
+        self.assertTrue(game.bot.blackboard.squads or game.ai.blackboard.squads)
+
+
+class AIEngines(unittest.TestCase):
+    def test_goap_plans_cheapest(self):
+        from server.game.ai import goap
+        actions = [
+            goap.Action("walk", {}, {"there": True}, 5),
+            goap.Action("get_car", {}, {"car": True}, 1),
+            goap.Action("drive", {"car": True}, {"there": True}, 1),
+        ]
+        steps = goap.plan({}, {"there": True}, actions)
+        names = []
+        for action in steps:
+            names.append(action.name)
+        self.assertEqual(names, ["get_car", "drive"])
+        self.assertEqual(goap.plan({"there": True}, {"there": True}, actions), [])
+        self.assertIsNone(goap.plan({}, {"fly": True}, actions))
+
+    def test_htn_first_valid_method(self):
+        from server.game.ai.htn import Compound, Domain, Method, Primitive
+        done = []
+
+        class Context:
+            trace = []
+            ready = False
+
+        domain = Domain([
+            Compound("Attack", [
+                Method("pincer", lambda c: c.ready, ["left", "right"]),
+                Method("direct", lambda c: True, ["front"]),
+            ]),
+            Primitive("left", lambda c: done.append("left")),
+            Primitive("right", lambda c: done.append("right")),
+            Primitive("front", lambda c: done.append("front")),
+        ])
+        context = Context()
+        for primitive in domain.decompose("Attack", context):
+            primitive.operator(context)
+        context.ready = True
+        for primitive in domain.decompose("Attack", context):
+            primitive.operator(context)
+        self.assertEqual(done, ["front", "left", "right"])
+
+    def test_utility_zero_vetoes(self):
+        from server.game.ai import utility
+        high = utility.Option("high", [utility.Consideration("a", lambda o, c: 0.9),
+                                       utility.Consideration("b", lambda o, c: 0.8)])
+        vetoed = utility.Option("vetoed", [utility.Consideration("a", lambda o, c: 1.0),
+                                           utility.Consideration("b", lambda o, c: 0.0)])
+        low = utility.Option("low", [utility.Consideration("a", lambda o, c: 0.3)])
+        ranked = utility.rank([vetoed, low, high], None)
+        names = []
+        for entry in ranked:
+            names.append(entry.option.name)
+        self.assertEqual(names, ["high", "low", "vetoed"])
+        self.assertEqual(ranked[2].score, 0)
+
+    def test_campaign_ai_takes_idle_hq(self):
+        game = Game(2, "hard", seed=4)
+        while game.winner is None:
+            game.tick()
+        self.assertEqual((game.winner, game.reason), (2, "hq"))
 
 
 class LuaIsolation(unittest.TestCase):

@@ -2,7 +2,7 @@ import { createMap, terrainColors } from "./map.js";
 import { escapeHtml as esc, number, percent } from "./ui.js";
 
 const statusNames = { idle: "대기", move: "이동", engaged: "교전", retreat: "후퇴" };
-const endReasons = { hq: "본부 함락", time: "제한 시간 종료", surrender: "항복" };
+const endReasons = { hq: "본부 함락", time: "제한 시간 종료", surrender: "항복", stopped: "관전 종료 · 영토 판정" };
 
 function clock(seconds) {
   const left = Math.max(0, Math.ceil(seconds));
@@ -88,7 +88,7 @@ export function createBattle(root, options) {
   }
 
   function build(template) {
-    if (finished || surrenderRequested || !init?.templates[template]) return;
+    if (finished || surrenderRequested || init?.bots || !init?.templates[template]) return;
     if (state && state.res < init.templates[template].cost) {
       eventLine("사단을 생산할 자원이 부족합니다.", "bad");
       return;
@@ -130,7 +130,7 @@ export function createBattle(root, options) {
   }
 
   function updateProduction() {
-    const status = init.templates.map(({ cost }) => finished || surrenderRequested || (state !== undefined && state.res < cost));
+    const status = init.templates.map(({ cost }) => finished || surrenderRequested || init.bots || (state !== undefined && state.res < cost));
     const key = status.join(",");
     if (productionStatus === key) return;
     productionStatus = key;
@@ -140,13 +140,17 @@ export function createBattle(root, options) {
   function start(message) {
     init = message;
     map = createMap(frame.querySelector(".map-host"), message, {
-      send: (command) => { if (!finished && !surrenderRequested) send(command); },
+      send: (command) => { if (!finished && !surrenderRequested && !init.bots) send(command); },
       onBuild: build,
       onSelection: (next) => { selected = next; showSelected(); },
       weatherNames,
     });
     for (const { id, name } of init.custom_battalions ?? []) battalions.set(id, name);
-    const title = init.sandbox ? `샌드박스 · ${init.map_name}` : data.stages[init.stage]?.name;
+    const title = init.sandbox ? `${init.bots ? "봇전투" : "샌드박스"} · ${init.map_name}` : data.stages[init.stage]?.name;
+    if (init.bots) {
+      surrender.textContent = "관전 종료";
+      frame.querySelector(".control-help").textContent = "관전 중 · 우드래그 / WASD / 방향키 지도 이동 · 휠 확대 · 배속 버튼으로 속도 조절";
+    }
     get("mission-title").textContent = `${title ?? ""} · 난이도 ${data.difficulty[init.difficulty]?.name ?? ""}`;
     get("time-left").textContent = clock(init.match_seconds);
     showSpeed(init.speed);
@@ -161,7 +165,7 @@ export function createBattle(root, options) {
     }, [0, 0]));
     overlay.hidden = true;
     surrender.disabled = false;
-    eventLine("작전을 시작했습니다.");
+    eventLine(init.bots ? "봇전투를 시작했습니다. 양쪽 AI가 지휘합니다." : "작전을 시작했습니다.");
   }
 
   function finish() {
@@ -184,7 +188,8 @@ export function createBattle(root, options) {
   });
 
   surrender.onclick = () => {
-    if (!init || finished || surrenderRequested || !window.confirm("항복하면 패배로 처리됩니다. 항복하시겠습니까?")) return;
+    const question = init?.bots ? "관전을 끝내시겠습니까?" : "항복하면 패배로 처리됩니다. 항복하시겠습니까?";
+    if (!init || finished || surrenderRequested || !window.confirm(question)) return;
     surrenderRequested = true;
     surrender.disabled = true;
     updateProduction();
@@ -227,7 +232,8 @@ export function createBattle(root, options) {
           finish();
           display(sandbox ? (endReasons[message.reason] ?? "")
             : `${endReasons[message.reason] ?? ""} · ${number(message.points_earned)} 포인트 획득`,
-            message.winner === (init?.you ?? 1) ? "작전 승리" : "작전 패배");
+            init?.bots ? (message.winner === 1 ? "청군 승리" : "적군 승리")
+              : message.winner === (init?.you ?? 1) ? "작전 승리" : "작전 패배");
           break;
       }
     },

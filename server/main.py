@@ -231,7 +231,7 @@ def _create_game(start, user_id, user):
     speed = _speed(start)
 
     if mode == "sandbox":
-        setup = sandbox.build(start.get("map"), start.get("script"), user)
+        setup = sandbox.build(start.get("map"), start.get("script"), user, start.get("bots") is True)
         return Game(None, difficulty, setup.templates, setup.levels, speed=speed,
                     scenario=setup.scenario)
 

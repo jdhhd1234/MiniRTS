@@ -6,7 +6,7 @@ from math import dist, floor
 from random import Random
 
 from . import data, hexmap as world
-from .ai import AI
+from .ai import AI, AIProfile
 from .scripting import ScriptError
 
 TICK_HZ = 10
@@ -50,10 +50,13 @@ class Template:
 
 @dataclass
 class Scenario:
-    """샌드박스 한 판의 설정: 맵, 대대 목록(Lua 대대 포함), 적 편제."""
+    """샌드박스 한 판의 설정: 맵, 대대 목록(Lua 대대 포함), 적 편제, 시작 사단, AI 성향."""
     map: world.MapData
     catalog: dict
-    ai_templates: list | None = None
+    ai_templates: list | None = None    # 적군 편제 [{"name", "battalions"}]
+    start: dict = field(default_factory=dict)        # 진영 -> 시작 사단 편제 번호 목록
+    ai_profiles: dict = field(default_factory=dict)  # 진영 -> AIProfile
+    bots: bool = False                  # 봇전투: 청군도 AI가 지휘하고 플레이어는 관전
 
 
 @dataclass(frozen=True)
@@ -358,19 +361,22 @@ class Game:
         for template in player_templates:
             self.templates[1].append(self._template(template["name"], template["battalions"]))
 
-        ai_templates = self.stage_data.ai_templates
-
         if self.sandbox and scenario.ai_templates:
-            ai_templates = scenario.ai_templates
+            for template in scenario.ai_templates:
+                self.templates[2].append(self._template(template["name"], template["battalions"]))
+        else:
+            for battalions in self.stage_data.ai_templates:
+                self.templates[2].append(self._template("사단", battalions))
 
-        for battalions in ai_templates:
-            self.templates[2].append(self._template("사단", battalions))
 
-
-        # 5. 유닛·AI
+        # 5. 유닛·AI (봇전투면 청군도 AI)
+        self.bots = self.sandbox and scenario.bots
+        self.start = scenario.start if self.sandbox else {}
+        profiles = scenario.ai_profiles if self.sandbox else {}
         self.units = {}
         self.next_unit_id = 0
-        self.ai = AI(self.difficulty_data)
+        self.ai = AI(2, self.difficulty_data, profiles.get(2, AIProfile()))
+        self.bot = AI(1, self.difficulty_data, profiles.get(1, AIProfile())) if self.bots else None
         self._deploy_starting_units()
 
     @property
@@ -419,8 +425,17 @@ class Game:
             if not templates:
                 templates = self._default_templates()
 
-            for i in range(getattr(self.stage_data, count_key)):
-                template = templates[i % len(templates)]
+            # 샌드박스 Lua가 시작 사단을 정했으면 그 편제 순서대로, 아니면 스테이지 개수만큼 돌아가며
+            chosen = []
+
+            if side in self.start:
+                for index in self.start[side]:
+                    chosen.append(self.templates[side][index])
+            else:
+                for i in range(getattr(self.stage_data, count_key)):
+                    chosen.append(templates[i % len(templates)])
+
+            for i, template in enumerate(chosen):
                 base = forward_bases[i % len(forward_bases)]
                 self.spawn(side, template, base.cell)
 
@@ -450,7 +465,8 @@ class Game:
 
         income = data.INCOME_BASE + self.territory[side] * data.INCOME_PER_HEX + base_income
 
-        if side == 2:
+        # 봇전투는 양쪽 다 AI라 같은 보정을 받는다.
+        if side == 2 or self.bots:
             income *= self.stage_data.ai_income * self.difficulty_data.income
 
         return income
@@ -881,6 +897,9 @@ class Game:
         # 2. AI 판단과 생산
         self.ai.update(self)
 
+        if self.bot is not None:
+            self.bot.update(self)
+
         for side in SIDES:
             self._produce(side)
 
@@ -943,7 +962,15 @@ class Game:
 
         command = message.get("t")
 
-        if command == "surrender":
+        if self.bots and command in ("build", "move", "retreat"):
+            raise ValueError("봇전투 관전 중에는 사단을 지휘할 수 없습니다.")
+
+        if command == "surrender" and self.bots:
+            # 관전 종료: 시간 종료처럼 영토로 판정
+            self.winner = 1 if self.territory[1] > self.territory[2] else 2
+            self.reason = "stopped"
+
+        elif command == "surrender":
             self.winner, self.reason = 2, "surrender"
 
         elif command == "build":
@@ -1031,6 +1058,7 @@ class Game:
         message = {
             "t": "init",
             "sandbox": self.sandbox,
+            "bots": self.bots,
             "speed": self.speed,
             "map_name": self.map.name,
             "custom_battalions": custom,

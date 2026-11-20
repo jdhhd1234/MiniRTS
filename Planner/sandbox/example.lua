@@ -1,35 +1,51 @@
--- MinRTS 샌드박스 예제: 드래곤 대대와 마법사 대대
--- 형식은 Planner/sandbox/README.md 참고.
 
-local dragon = {
-  name = "드래곤대대",
-  cls = "air",              -- 상성: 대공(aa)에게 2배 피해를 받는다
-  atk = 40, dfn = 20, spd = 3.5, rng = 30, hp = 220, cost = 120,
+-- MinRTS 샌드박스 예제: 이세계 초능력군
+-- 초능력으로 비행, 방어, 정신 공격, 재생을 수행하는 군대
+
+-- 1. 염동력 비행대대
+local psychic_flyer = {
+  name = "염동력비행대대",
+  cls = "air",
+  atk = 40, dfn = 20, spd = 3.5, rng = 30,
+  hp = 220, cost = 120,
   fn = "UCVRA-",
-  move = { sea = 1.0, mountain = 1.0, highland = 1.0, swamp = 1.0, river = 1.0, forest = 1.0 },
 
-  -- 불길: 숲·도시에 있는 적에게 피해 +30%
+  -- 염동력 비행: 모든 지형을 자유롭게 이동
+  move = {
+    sea = 1.0,
+    mountain = 1.0,
+    highland = 1.0,
+    swamp = 1.0,
+    river = 1.0,
+    forest = 1.0
+  },
+
+  -- 초능력 폭발: 숲과 도시의 적에게 추가 피해
   on_attack = function(ctx)
-    if ctx.target == "unit" and (ctx.terrain == "forest" or ctx.terrain == "city") then
+    if ctx.target == "unit" and
+       (ctx.terrain == "forest" or ctx.terrain == "city") then
       return ctx.damage * 1.3
     end
   end,
 }
 
-local mage = {
-  name = "마법사대대",
-  cls = "magic",            -- 상성표에 없는 병과: 모든 상성 1.0
-  atk = 18, dfn = 6, spd = 1.4, rng = 50, hp = 70, cost = 60,
+-- 2. 사이오닉 특수대대
+local psionic = {
+  name = "사이오닉특수대대",
+  cls = "magic",
+  -- 기존 magic 병과를 초능력 병과로 재해석
+  atk = 18, dfn = 6, spd = 1.4, rng = 50,
+  hp = 70, cost = 60,
   fn = "UCF---",
 
-  -- 보호막: 체력이 절반 이하면 받는 피해 -40%
+  -- 염동력 보호막: 체력 절반 미만 시 피해 40% 감소
   on_damaged = function(ctx)
     if ctx.hp < ctx.mhp * 0.5 then
       return ctx.damage * 0.6
     end
   end,
 
-  -- 치유술: 교전 중이 아닐 때 초당 최대 체력 2% 회복
+  -- 초재생: 비교전 시 초당 최대 체력 2% 회복
   on_tick = function(ctx)
     if not ctx.engaged then
       return 0.02
@@ -37,18 +53,105 @@ local mage = {
   end,
 }
 
+-- 3. 초능력 강습대대
+local psychic_assault = {
+  name = "초능력강습대대",
+  cls = "inf",
+  atk = 28, dfn = 14, spd = 2.0, rng = 35,
+  hp = 130, cost = 85,
+  fn = "UCF---",
+
+  -- 정신 충격파: 기본 공격 피해 20% 증가
+  on_attack = function(ctx)
+    if ctx.target == "unit" then
+      return ctx.damage * 1.2
+    end
+  end,
+}
+
+-- 4. 초능력 방어대대
+local psychic_guard = {
+  name = "초능력방어대대",
+  cls = "inf",
+  atk = 14, dfn = 28, spd = 1.2, rng = 25,
+  hp = 180, cost = 90,
+  fn = "UCF---",
+
+  -- 공간 왜곡 방벽: 받는 피해 25% 감소
+  on_damaged = function(ctx)
+    return ctx.damage * 0.75
+  end,
+}
+
 return {
-  battalions = { dragon = dragon, mage = mage },
+  battalions = {
+    psychic_flyer = psychic_flyer,
+    psionic = psionic,
+    psychic_assault = psychic_assault,
+    psychic_guard = psychic_guard,
+  },
 
   templates = {
-    { name = "비룡사단",   battalions = { "dragon", "dragon" } },          -- 바다를 건넌다
-    { name = "용기병사단", battalions = { "dragon", "mech" } },            -- 기계화가 있어 바다는 못 건넌다
-    { name = "마도사단",   battalions = { "mage", "mage", "inf", "inf" } },
-    { name = "보병사단",   battalions = { "inf", "inf", "arty", "eng" } },
+    {
+      name = "염동력비행사단",
+      battalions = {
+        "psychic_flyer",
+        "psychic_flyer"
+      }
+    },
+
+    {
+      name = "초능력기동사단",
+      battalions = {
+        "psychic_flyer",
+        "mech"
+      }
+    },
+
+    {
+      name = "사이오닉전투사단",
+      battalions = {
+        "psionic",
+        "psionic",
+        "psychic_assault",
+        "psychic_guard"
+      }
+    },
+
+    {
+      name = "초능력강습사단",
+      battalions = {
+        "psychic_assault",
+        "psychic_assault",
+        "psychic_guard",
+        "psionic"
+      }
+    },
+
+    {
+      name = "초능력방어사단",
+      battalions = {
+        "psychic_guard",
+        "psychic_guard",
+        "psionic",
+        "inf"
+      }
+    },
   },
 
   enemy_templates = {
-    { name = "적 기갑", battalions = { "tank", "tank", "mech", "aa" } },
-    { name = "적 보병", battalions = { "inf", "inf", "at", "arty" } },
+    {
+      name = "적 기갑사단",
+      battalions = {
+        "tank", "tank", "mech", "aa"
+      }
+    },
+
+    {
+      name = "적 보병사단",
+      battalions = {
+        "inf", "inf", "at", "arty"
+      }
+    },
   },
 }

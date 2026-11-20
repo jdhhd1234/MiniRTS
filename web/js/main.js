@@ -12,7 +12,7 @@ let page = "sortie";
 let stage = 1;
 let difficulty = "normal";
 let speed = 1;
-const sandbox = { difficulty: "normal", speed: 1, map: null, mapName: "", script: "", message: "" };
+const sandbox = { difficulty: "normal", speed: 1, map: null, mapName: "", script: "", message: "", bots: false };
 let draft = [];
 let activeTemplate = 0;
 let busy = false;
@@ -188,12 +188,15 @@ function sandboxPage(content, message) {
           ${["easy", "normal", "hard"].map((key) => `<button data-difficulty="${key}" aria-pressed="${sandbox.difficulty === key}">${esc(data.difficulty[key].name)}</button>`).join("")}
         </div></fieldset>
         <fieldset><legend>시작 배속 · 전투 중에도 바꿀 수 있습니다</legend>${speedButtons(sandbox.speed)}</fieldset>
+        <label class="check-row"><input type="checkbox" id="bots" ${sandbox.bots ? "checked" : ""}>
+          봇전투 (AI 대 AI) · 청군도 AI가 지휘하고 관전만 합니다</label>
         <p class="message" role="status">${esc(status)}</p>
         <button id="sortie" class="primary">샌드박스 출격</button>
       </section>
     </div>`;
   const redraw = (text = "") => sandboxPage(content, text);
   const script = content.querySelector("#script");
+  content.querySelector("#bots").onchange = (event) => { sandbox.bots = event.target.checked; };
   script.oninput = () => { sandbox.script = script.value; };
   content.querySelectorAll("[data-difficulty]").forEach((button) => {
     button.onclick = () => { sandbox.difficulty = button.dataset.difficulty; redraw(); };
@@ -227,7 +230,7 @@ function sandboxPage(content, message) {
   };
   content.querySelector("#sortie").onclick = () => startBattle({
     t: "start", mode: "sandbox", difficulty: sandbox.difficulty, speed: sandbox.speed,
-    map: sandbox.map, script: sandbox.script.trim() ? sandbox.script : null,
+    map: sandbox.map, script: sandbox.script.trim() ? sandbox.script : null, bots: sandbox.bots,
   });
 }
 
